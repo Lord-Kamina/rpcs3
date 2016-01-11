@@ -1,5 +1,4 @@
 #include "stdafx.h"
-#include "Utilities/Log.h"
 #include "Emu/System.h"
 
 #include "GLVertexProgram.h"
@@ -9,6 +8,12 @@ std::string GLVertexDecompilerThread::getFloatTypeName(size_t elementCount)
 {
 	return getFloatTypeNameImpl(elementCount);
 }
+
+std::string GLVertexDecompilerThread::getIntTypeName(size_t elementCount)
+{
+	return "ivec4";
+}
+
 
 std::string GLVertexDecompilerThread::getFunction(FUNCTION f)
 {
@@ -23,7 +28,10 @@ std::string GLVertexDecompilerThread::compareFunction(COMPARE f, const std::stri
 void GLVertexDecompilerThread::insertHeader(std::stringstream &OS)
 {
 	OS << "#version 420" << std::endl << std::endl;
-	OS << "uniform mat4 scaleOffsetMat = mat4(1.0);" << std::endl;
+	OS << "layout(std140, binding = 0) uniform ScaleOffsetBuffer" << std::endl;
+	OS << "{" << std::endl;
+	OS << "	mat4 scaleOffsetMat;" << std::endl;
+	OS << "};" << std::endl;
 }
 
 void GLVertexDecompilerThread::insertInputs(std::stringstream & OS, const std::vector<ParamType>& inputs)
@@ -31,17 +39,16 @@ void GLVertexDecompilerThread::insertInputs(std::stringstream & OS, const std::v
 	for (const ParamType PT : inputs)
 	{
 		for (const ParamItem &PI : PT.items)
-			OS << "layout(location = " << PI.location << ") in " << PT.type << " " << PI.name << ";" << std::endl;
+			OS << /*"layout(location = " << PI.location << ") "*/  "in " << PT.type << " " << PI.name << ";" << std::endl;
 	}
 }
 
 void GLVertexDecompilerThread::insertConstants(std::stringstream & OS, const std::vector<ParamType> & constants)
 {
-	for (const ParamType PT : constants)
-	{
-		for (const ParamItem &PI : PT.items)
-			OS << "uniform " << PT.type << " " << PI.name << ";" << std::endl;
-	}
+	OS << "layout(std140, binding = 1) uniform VertexConstantsBuffer" << std::endl;
+	OS << "{" << std::endl;
+	OS << "	vec4 vc[468];" << std::endl;
+	OS << "};" << std::endl;
 }
 
 struct reg_info

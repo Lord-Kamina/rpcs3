@@ -6,9 +6,9 @@
 #include "Emu/SysCalls/lv2/sys_ppu_thread.h"
 #include "sysPrxForUser.h"
 
-extern Module sysPrxForUser;
+extern Module<> sysPrxForUser;
 
-s32 sys_ppu_thread_create(PPUThread& ppu, vm::ptr<u64> thread_id, u32 entry, u64 arg, s32 prio, u32 stacksize, u64 flags, vm::cptr<char> threadname)
+s32 sys_ppu_thread_create(vm::ptr<u64> thread_id, u32 entry, u64 arg, s32 prio, u32 stacksize, u64 flags, vm::cptr<char> threadname)
 {
 	sysPrxForUser.Warning("sys_ppu_thread_create(thread_id=*0x%x, entry=0x%x, arg=0x%llx, prio=%d, stacksize=0x%x, flags=0x%llx, threadname=*0x%x)", thread_id, entry, arg, prio, stacksize, flags, threadname);
 
@@ -16,13 +16,8 @@ s32 sys_ppu_thread_create(PPUThread& ppu, vm::ptr<u64> thread_id, u32 entry, u64
 	// (return CELL_ENOMEM if failed)
 	// ...
 
-	vm::stackvar<ppu_thread_param_t> attr(ppu);
-
-	attr->entry = entry;
-	attr->tls = 0;
-
 	// call the syscall
-	if (s32 res = _sys_ppu_thread_create(thread_id, attr, arg, 0, prio, stacksize, flags, threadname))
+	if (s32 res = _sys_ppu_thread_create(thread_id, vm::make_var(ppu_thread_param_t{ entry, 0 }), arg, 0, prio, stacksize, flags, threadname))
 	{
 		return res;
 	}
@@ -48,8 +43,14 @@ void sys_ppu_thread_exit(PPUThread& ppu, u64 val)
 	// (deallocate TLS)
 	// ...
 
-	// call the syscall
-	_sys_ppu_thread_exit(ppu, val);
+	if (ppu.hle_code == 0xaff080a4)
+	{
+		// Change sys_ppu_thread_exit code to the syscall code
+		ppu.hle_code = ~41;
+	}
+
+	// Call the syscall
+	return _sys_ppu_thread_exit(ppu, val);
 }
 
 std::mutex g_once_mutex;

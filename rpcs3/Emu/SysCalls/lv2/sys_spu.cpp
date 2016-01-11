@@ -100,11 +100,11 @@ u32 spu_thread_initialize(u32 group_id, u32 spu_num, vm::ptr<sys_spu_image> img,
 		sys_spu.Error("Unsupported SPU Thread options (0x%x)", option);
 	}
 
-	const auto spu = Emu.GetIdManager().make_ptr<SPUThread>(name, spu_num);
+	const auto spu = idm::make_ptr<SPUThread>(name, spu_num);
 
 	spu->custom_task = task;
 
-	const auto group = Emu.GetIdManager().get<spu_group_t>(group_id);
+	const auto group = idm::get<lv2_spu_group_t>(group_id);
 
 	spu->tg = group;
 	group->threads[spu_num] = spu;
@@ -140,7 +140,7 @@ s32 sys_spu_thread_initialize(vm::ptr<u32> thread, u32 group_id, u32 spu_num, vm
 
 	LV2_LOCK;
 
-	const auto group = Emu.GetIdManager().get<spu_group_t>(group_id);
+	const auto group = idm::get<lv2_spu_group_t>(group_id);
 
 	if (!group)
 	{
@@ -167,7 +167,7 @@ s32 sys_spu_thread_set_argument(u32 id, vm::ptr<sys_spu_thread_argument> arg)
 
 	LV2_LOCK;
 
-	const auto thread = Emu.GetIdManager().get<SPUThread>(id);
+	const auto thread = idm::get<SPUThread>(id);
 
 	if (!thread)
 	{
@@ -200,7 +200,7 @@ s32 sys_spu_thread_get_exit_status(u32 id, vm::ptr<u32> status)
 
 	LV2_LOCK;
 
-	const auto thread = Emu.GetIdManager().get<SPUThread>(id);
+	const auto thread = idm::get<SPUThread>(id);
 
 	if (!thread)
 	{
@@ -209,11 +209,9 @@ s32 sys_spu_thread_get_exit_status(u32 id, vm::ptr<u32> status)
 
 	// TODO: check CELL_ESTAT condition
 
-	bool notify;
+	*status = thread->ch_out_mbox.pop();
 
-	std::tie(*status, notify) = thread->ch_out_mbox.pop();
-
-	if (notify)
+	if (thread->ch_out_mbox.notification_required)
 	{
 		throw EXCEPTION("Unexpected");
 	}
@@ -232,12 +230,12 @@ s32 sys_spu_thread_group_create(vm::ptr<u32> id, u32 num, s32 prio, vm::ptr<sys_
 		return CELL_EINVAL;
 	}
 
-	if (attr->type.data())
+	if (attr->type)
 	{
 		sys_spu.Todo("Unsupported SPU Thread Group type (0x%x)", attr->type);
 	}
 
-	*id = Emu.GetIdManager().make<spu_group_t>(std::string{ attr->name.get_ptr(), attr->nsize - 1 }, num, prio, attr->type, attr->ct);
+	*id = idm::make<lv2_spu_group_t>(std::string{ attr->name.get_ptr(), attr->nsize - 1 }, num, prio, attr->type, attr->ct);
 
 	return CELL_OK;
 }
@@ -248,7 +246,7 @@ s32 sys_spu_thread_group_destroy(u32 id)
 
 	LV2_LOCK;
 
-	const auto group = Emu.GetIdManager().get<spu_group_t>(id);
+	const auto group = idm::get<lv2_spu_group_t>(id);
 
 	if (!group)
 	{
@@ -265,14 +263,14 @@ s32 sys_spu_thread_group_destroy(u32 id)
 	{
 		if (t)
 		{
-			Emu.GetIdManager().remove<SPUThread>(t->get_id());
+			idm::remove<SPUThread>(t->get_id());
 
 			t.reset();
 		}
 	}
 
 	group->state = SPU_THREAD_GROUP_STATUS_NOT_INITIALIZED; // hack
-	Emu.GetIdManager().remove<spu_group_t>(id);
+	idm::remove<lv2_spu_group_t>(id);
 
 	return CELL_OK;
 }
@@ -283,7 +281,7 @@ s32 sys_spu_thread_group_start(u32 id)
 
 	LV2_LOCK;
 
-	const auto group = Emu.GetIdManager().get<spu_group_t>(id);
+	const auto group = idm::get<lv2_spu_group_t>(id);
 
 	if (!group)
 	{
@@ -314,14 +312,14 @@ s32 sys_spu_thread_group_start(u32 id)
 
 			// Copy SPU image:
 			// TODO: use segment info
-			std::memcpy(vm::get_ptr<void>(t->offset), vm::get_ptr<void>(image->addr), 256 * 1024);
+			std::memcpy(vm::base(t->offset), vm::base(image->addr), 256 * 1024);
 
-			t->PC = image->entry_point;
+			t->pc = image->entry_point;
 			t->run();
-			t->GPR[3] = u128::from64(0, args.arg1);
-			t->GPR[4] = u128::from64(0, args.arg2);
-			t->GPR[5] = u128::from64(0, args.arg3);
-			t->GPR[6] = u128::from64(0, args.arg4);
+			t->gpr[3] = v128::from64(0, args.arg1);
+			t->gpr[4] = v128::from64(0, args.arg2);
+			t->gpr[5] = v128::from64(0, args.arg3);
+			t->gpr[6] = v128::from64(0, args.arg4);
 
 			t->status.exchange(SPU_STATUS_RUNNING);
 		}
@@ -345,7 +343,7 @@ s32 sys_spu_thread_group_suspend(u32 id)
 
 	LV2_LOCK;
 
-	const auto group = Emu.GetIdManager().get<spu_group_t>(id);
+	const auto group = idm::get<lv2_spu_group_t>(id);
 
 	if (!group)
 	{
@@ -395,7 +393,7 @@ s32 sys_spu_thread_group_resume(u32 id)
 
 	LV2_LOCK;
 
-	const auto group = Emu.GetIdManager().get<spu_group_t>(id);
+	const auto group = idm::get<lv2_spu_group_t>(id);
 
 	if (!group)
 	{
@@ -438,11 +436,16 @@ s32 sys_spu_thread_group_yield(u32 id)
 
 	LV2_LOCK;
 
-	const auto group = Emu.GetIdManager().get<spu_group_t>(id);
+	const auto group = idm::get<lv2_spu_group_t>(id);
 
 	if (!group)
 	{
 		return CELL_ESRCH;
+	}
+
+	if (group->type & SYS_SPU_THREAD_GROUP_TYPE_EXCLUSIVE_NON_CONTEXT) // this check may be inaccurate
+	{
+		return CELL_OK;
 	}
 
 	if (group->state != SPU_THREAD_GROUP_STATUS_RUNNING)
@@ -462,8 +465,8 @@ s32 sys_spu_thread_group_terminate(u32 id, s32 value)
 	LV2_LOCK;
 
 	// seems the id can be either SPU Thread Group or SPU Thread
-	const auto thread = Emu.GetIdManager().get<SPUThread>(id);
-	const auto group = thread ? thread->tg.lock() : Emu.GetIdManager().get<spu_group_t>(id);
+	const auto thread = idm::get<SPUThread>(id);
+	const auto group = thread ? thread->tg.lock() : idm::get<lv2_spu_group_t>(id);
 
 	if (!group && !thread)
 	{
@@ -515,7 +518,7 @@ s32 sys_spu_thread_group_join(u32 id, vm::ptr<u32> cause, vm::ptr<u32> status)
 
 	LV2_LOCK;
 
-	const auto group = Emu.GetIdManager().get<spu_group_t>(id);
+	const auto group = idm::get<lv2_spu_group_t>(id);
 
 	if (!group)
 	{
@@ -541,7 +544,7 @@ s32 sys_spu_thread_group_join(u32 id, vm::ptr<u32> cause, vm::ptr<u32> status)
 		{
 			if (t)
 			{
-				if ((t->status.load() & SPU_STATUS_STOPPED_BY_STOP) == 0)
+				if ((t->status & SPU_STATUS_STOPPED_BY_STOP) == 0)
 				{
 					stopped = false;
 					break;
@@ -592,20 +595,20 @@ s32 sys_spu_thread_group_join(u32 id, vm::ptr<u32> cause, vm::ptr<u32> status)
 	return CELL_OK;
 }
 
-s32 sys_spu_thread_write_ls(u32 id, u32 address, u64 value, u32 type)
+s32 sys_spu_thread_write_ls(u32 id, u32 lsa, u64 value, u32 type)
 {
-	sys_spu.Log("sys_spu_thread_write_ls(id=0x%x, address=0x%x, value=0x%llx, type=%d)", id, address, value, type);
+	sys_spu.Log("sys_spu_thread_write_ls(id=0x%x, lsa=0x%05x, value=0x%llx, type=%d)", id, lsa, value, type);
 
 	LV2_LOCK;
 
-	const auto thread = Emu.GetIdManager().get<SPUThread>(id);
+	const auto thread = idm::get<SPUThread>(id);
 
 	if (!thread)
 	{
 		return CELL_ESRCH;
 	}
 
-	if (address >= 0x40000 || address + type > 0x40000 || address % type) // check range and alignment
+	if (lsa >= 0x40000 || lsa + type > 0x40000 || lsa % type) // check range and alignment
 	{
 		return CELL_EINVAL;
 	}
@@ -624,30 +627,30 @@ s32 sys_spu_thread_write_ls(u32 id, u32 address, u64 value, u32 type)
 
 	switch (type)
 	{
-	case 1: thread->write8(address, (u8)value); break;
-	case 2: thread->write16(address, (u16)value); break;
-	case 4: thread->write32(address, (u32)value); break;
-	case 8: thread->write64(address, value); break;
+	case 1: thread->_ref<u8>(lsa) = (u8)value; break;
+	case 2: thread->_ref<u16>(lsa) = (u16)value; break;
+	case 4: thread->_ref<u32>(lsa) = (u32)value; break;
+	case 8: thread->_ref<u64>(lsa) = value; break;
 	default: return CELL_EINVAL;
 	}
 
 	return CELL_OK;
 }
 
-s32 sys_spu_thread_read_ls(u32 id, u32 address, vm::ptr<u64> value, u32 type)
+s32 sys_spu_thread_read_ls(u32 id, u32 lsa, vm::ptr<u64> value, u32 type)
 {
-	sys_spu.Log("sys_spu_thread_read_ls(id=0x%x, address=0x%x, value=*0x%x, type=%d)", id, address, value, type);
+	sys_spu.Log("sys_spu_thread_read_ls(id=0x%x, lsa=0x%05x, value=*0x%x, type=%d)", id, lsa, value, type);
 
 	LV2_LOCK;
 
-	const auto thread = Emu.GetIdManager().get<SPUThread>(id);
+	const auto thread = idm::get<SPUThread>(id);
 
 	if (!thread)
 	{
 		return CELL_ESRCH;
 	}
 
-	if (address >= 0x40000 || address + type > 0x40000 || address % type) // check range and alignment
+	if (lsa >= 0x40000 || lsa + type > 0x40000 || lsa % type) // check range and alignment
 	{
 		return CELL_EINVAL;
 	}
@@ -666,10 +669,10 @@ s32 sys_spu_thread_read_ls(u32 id, u32 address, vm::ptr<u64> value, u32 type)
 
 	switch (type)
 	{
-	case 1: *value = thread->read8(address); break;
-	case 2: *value = thread->read16(address); break;
-	case 4: *value = thread->read32(address); break;
-	case 8: *value = thread->read64(address); break;
+	case 1: *value = thread->_ref<u8>(lsa); break;
+	case 2: *value = thread->_ref<u16>(lsa); break;
+	case 4: *value = thread->_ref<u32>(lsa); break;
+	case 8: *value = thread->_ref<u64>(lsa); break;
 	default: return CELL_EINVAL;
 	}
 
@@ -682,7 +685,7 @@ s32 sys_spu_thread_write_spu_mb(u32 id, u32 value)
 
 	LV2_LOCK;
 
-	const auto thread = Emu.GetIdManager().get<SPUThread>(id);
+	const auto thread = idm::get<SPUThread>(id);
 
 	if (!thread)
 	{
@@ -703,7 +706,7 @@ s32 sys_spu_thread_write_spu_mb(u32 id, u32 value)
 
 	if (thread->ch_in_mbox.push(value))
 	{
-		// notify if necessary
+		// lock for reliable notification
 		std::lock_guard<std::mutex> lock(thread->mutex);
 
 		thread->cv.notify_one();
@@ -718,7 +721,7 @@ s32 sys_spu_thread_set_spu_cfg(u32 id, u64 value)
 
 	LV2_LOCK;
 
-	const auto thread = Emu.GetIdManager().get<SPUThread>(id);
+	const auto thread = idm::get<SPUThread>(id);
 
 	if (!thread)
 	{
@@ -741,7 +744,7 @@ s32 sys_spu_thread_get_spu_cfg(u32 id, vm::ptr<u64> value)
 
 	LV2_LOCK;
 
-	const auto thread = Emu.GetIdManager().get<SPUThread>(id);
+	const auto thread = idm::get<SPUThread>(id);
 
 	if (!thread)
 	{
@@ -759,7 +762,7 @@ s32 sys_spu_thread_write_snr(u32 id, u32 number, u32 value)
 
 	LV2_LOCK;
 
-	const auto thread = Emu.GetIdManager().get<SPUThread>(id);
+	const auto thread = idm::get<SPUThread>(id);
 
 	if (!thread)
 	{
@@ -794,8 +797,8 @@ s32 sys_spu_thread_group_connect_event(u32 id, u32 eq, u32 et)
 
 	LV2_LOCK;
 
-	const auto group = Emu.GetIdManager().get<spu_group_t>(id);
-	const auto queue = Emu.GetIdManager().get<lv2_event_queue_t>(eq);
+	const auto group = idm::get<lv2_spu_group_t>(id);
+	const auto queue = idm::get<lv2_event_queue_t>(eq);
 
 	if (!group || !queue)
 	{
@@ -850,7 +853,7 @@ s32 sys_spu_thread_group_disconnect_event(u32 id, u32 et)
 
 	LV2_LOCK;
 
-	const auto group = Emu.GetIdManager().get<spu_group_t>(id);
+	const auto group = idm::get<lv2_spu_group_t>(id);
 
 	if (!group)
 	{
@@ -905,8 +908,8 @@ s32 sys_spu_thread_connect_event(u32 id, u32 eq, u32 et, u8 spup)
 
 	LV2_LOCK;
 
-	const auto thread = Emu.GetIdManager().get<SPUThread>(id);
-	const auto queue = Emu.GetIdManager().get<lv2_event_queue_t>(eq);
+	const auto thread = idm::get<SPUThread>(id);
+	const auto queue = idm::get<lv2_event_queue_t>(eq);
 
 	if (!thread || !queue)
 	{
@@ -937,7 +940,7 @@ s32 sys_spu_thread_disconnect_event(u32 id, u32 et, u8 spup)
 
 	LV2_LOCK;
 
-	const auto thread = Emu.GetIdManager().get<SPUThread>(id);
+	const auto thread = idm::get<SPUThread>(id);
 
 	if (!thread)
 	{
@@ -968,8 +971,8 @@ s32 sys_spu_thread_bind_queue(u32 id, u32 spuq, u32 spuq_num)
 
 	LV2_LOCK;
 
-	const auto thread = Emu.GetIdManager().get<SPUThread>(id);
-	const auto queue = Emu.GetIdManager().get<lv2_event_queue_t>(spuq);
+	const auto thread = idm::get<SPUThread>(id);
+	const auto queue = idm::get<lv2_event_queue_t>(spuq);
 
 	if (!thread || !queue)
 	{
@@ -1012,7 +1015,7 @@ s32 sys_spu_thread_unbind_queue(u32 id, u32 spuq_num)
 
 	LV2_LOCK;
 
-	const auto thread = Emu.GetIdManager().get<SPUThread>(id);
+	const auto thread = idm::get<SPUThread>(id);
 
 	if (!thread)
 	{
@@ -1038,8 +1041,8 @@ s32 sys_spu_thread_group_connect_event_all_threads(u32 id, u32 eq, u64 req, vm::
 
 	LV2_LOCK;
 
-	const auto group = Emu.GetIdManager().get<spu_group_t>(id);
-	const auto queue = Emu.GetIdManager().get<lv2_event_queue_t>(eq);
+	const auto group = idm::get<lv2_spu_group_t>(id);
+	const auto queue = idm::get<lv2_event_queue_t>(eq);
 
 	if (!group || !queue)
 	{
@@ -1109,7 +1112,7 @@ s32 sys_spu_thread_group_disconnect_event_all_threads(u32 id, u8 spup)
 
 	LV2_LOCK;
 
-	const auto group = Emu.GetIdManager().get<spu_group_t>(id);
+	const auto group = idm::get<lv2_spu_group_t>(id);
 
 	if (!group)
 	{
@@ -1182,11 +1185,11 @@ s32 sys_raw_spu_destroy(PPUThread& ppu, u32 id)
 				intr.tag->handler->join(ppu, lv2_lock);
 			}
 
-			Emu.GetIdManager().remove<lv2_int_tag_t>(intr.tag->id);
+			idm::remove<lv2_int_tag_t>(intr.tag->id);
 		}
 	}
 
-	Emu.GetIdManager().remove<RawSPUThread>(thread->get_id());
+	idm::remove<RawSPUThread>(thread->get_id());
 
 	return CELL_OK;
 }
@@ -1216,7 +1219,7 @@ s32 sys_raw_spu_create_interrupt_tag(u32 id, u32 class_id, u32 hwthread, vm::ptr
 		return CELL_EAGAIN;
 	}
 
-	int_ctrl.tag = Emu.GetIdManager().make_ptr<lv2_int_tag_t>();
+	int_ctrl.tag = idm::make_ptr<lv2_int_tag_t>();
 
 	*intrtag = int_ctrl.tag->id;
 
@@ -1260,7 +1263,7 @@ s32 sys_raw_spu_get_int_mask(u32 id, u32 class_id, vm::ptr<u64> mask)
 		return CELL_ESRCH;
 	}
 
-	*mask = thread->int_ctrl[class_id].mask.load();
+	*mask = thread->int_ctrl[class_id].mask;
 
 	return CELL_OK;
 }
@@ -1302,7 +1305,7 @@ s32 sys_raw_spu_get_int_stat(u32 id, u32 class_id, vm::ptr<u64> stat)
 		return CELL_ESRCH;
 	}
 
-	*stat = thread->int_ctrl[class_id].stat.load();
+	*stat = thread->int_ctrl[class_id].stat;
 
 	return CELL_OK;
 }
@@ -1318,13 +1321,11 @@ s32 sys_raw_spu_read_puint_mb(u32 id, vm::ptr<u32> value)
 		return CELL_ESRCH;
 	}
 
-	bool notify;
+	*value = thread->ch_out_intr_mbox.pop();
 
-	std::tie(*value, notify) = thread->ch_out_intr_mbox.pop();
-
-	if (notify)
+	if (thread->ch_out_intr_mbox.notification_required)
 	{
-		// notify if necessary
+		// lock for reliable notification
 		std::lock_guard<std::mutex> lock(thread->mutex);
 
 		thread->cv.notify_one();

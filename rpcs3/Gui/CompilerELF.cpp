@@ -1,5 +1,5 @@
+#include "stdafx.h"
 #include "stdafx_gui.h"
-#include "Utilities/rMsgBox.h"
 
 //#include "Emu/Cell/PPUProgramCompiler.h"
 //using namespace PPU_opcodes;
@@ -125,7 +125,7 @@ CompilerELF::CompilerELF(wxWindow* parent)
 		"	b 	exit, 0, 0\n"
 	);
 
-#ifdef _WIN32
+#ifdef _MSC_VER
 	::SendMessage((HWND)hex_list->GetHWND(), WM_VSCROLL, SB_BOTTOM, 0);
 	::SendMessage((HWND)asm_list->GetHWND(), WM_VSCROLL, SB_BOTTOM, 0);
 #endif
@@ -318,7 +318,7 @@ void CompilerELF::OnScroll(wxScrollWinEvent& event)
 		dst = hex_list;
 	}
 
-#ifdef _WIN32
+#ifdef _MSC_VER
 	if(!m_disable_scroll && src && dst && event.GetOrientation() == wxVERTICAL)
 	{
 		s64 kind = -1;
@@ -389,7 +389,7 @@ void CompilerELF::LoadElf(wxCommandEvent& event)
 		"All Files (*.*)|*.*",
 		wxFD_OPEN | wxFD_FILE_MUST_EXIST);
 
-	if(ctrl.ShowModal() == rID_CANCEL) return;
+	if(ctrl.ShowModal() == wxID_CANCEL) return;
 	LoadElf(fmt::ToUTF8(ctrl.GetPath()));
 }
 

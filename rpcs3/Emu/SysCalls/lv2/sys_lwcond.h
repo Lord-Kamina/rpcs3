@@ -1,6 +1,6 @@
 #pragma once
 
-#include "sleep_queue.h"
+#include "Utilities/SleepQueue.h"
 
 namespace vm { using namespace ps3; }
 
@@ -8,11 +8,7 @@ struct sys_lwmutex_t;
 
 struct sys_lwcond_attribute_t
 {
-	union
-	{
-		char name[8];
-		u64 name_u64;
-	};
+	char name[8];
 };
 
 struct sys_lwcond_t
@@ -34,8 +30,6 @@ struct lv2_lwcond_t
 
 	void notify(lv2_lock_t& lv2_lock, sleep_queue_t::value_type& thread, const std::shared_ptr<lv2_lwmutex_t>& mutex, bool mode2);
 };
-
-REG_ID_TYPE(lv2_lwcond_t, 0x97); // SYS_LWCOND_OBJECT
 
 // Aux
 class PPUThread;

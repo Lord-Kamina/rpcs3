@@ -1,11 +1,10 @@
+#include "stdafx.h"
 #include "stdafx_gui.h"
 
 #include <wx/listctrl.h>
 #include <wx/clipbrd.h>
-#include <fstream>
 
-#include "Ini.h"
-#include "Utilities/Log.h"
+#include "Emu/state.h"
 #include "Gui/ConLogFrame.h"
 
 wxDEFINE_EVENT(EVT_LOG_COMMAND, wxCommandEvent);
@@ -104,7 +103,7 @@ struct wxWriter : Log::LogListener
 	//put message into the log buffer
 	void log(const Log::LogMessage &msg) override
 	{
-		u8 logLevel = Ini.HLELogLvl.GetValue();
+		u8 logLevel = (u8)rpcs3::config.misc.log.level.value();
 		if (msg.mType != Log::TTY && logLevel != 0)
 		{
 			if (logLevel > static_cast<u32>(msg.mServerity))

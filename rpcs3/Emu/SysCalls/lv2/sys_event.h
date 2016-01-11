@@ -1,6 +1,6 @@
 #pragma once
 
-#include "sleep_queue.h"
+#include "Utilities/SleepQueue.h"
 
 namespace vm { using namespace ps3; }
 
@@ -54,12 +54,7 @@ struct sys_event_queue_attribute_t
 {
 	be_t<u32> protocol; // SYS_SYNC_PRIORITY or SYS_SYNC_FIFO
 	be_t<s32> type; // SYS_PPU_QUEUE or SYS_SPU_QUEUE
-
-	union
-	{
-		char name[8];
-		u64 name_u64;
-	};
+	char name[8];
 };
 
 struct sys_event_t
@@ -89,8 +84,6 @@ struct lv2_event_queue_t
 	void push(lv2_lock_t& lv2_lock, u64 source, u64 data1, u64 data2, u64 data3);
 };
 
-REG_ID_TYPE(lv2_event_queue_t, 0x8D); // SYS_EVENT_QUEUE_OBJECT
-
 struct lv2_event_port_t
 {
 	const s32 type; // port type, must be SYS_EVENT_PORT_LOCAL
@@ -104,8 +97,6 @@ struct lv2_event_port_t
 	{
 	}
 };
-
-REG_ID_TYPE(lv2_event_port_t, 0x0E); // SYS_EVENT_PORT_OBJECT
 
 class PPUThread;
 

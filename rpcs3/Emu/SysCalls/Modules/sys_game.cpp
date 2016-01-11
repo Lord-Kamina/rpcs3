@@ -6,7 +6,7 @@
 #include "Emu/FS/VFS.h"
 #include "sysPrxForUser.h"
 
-extern Module sysPrxForUser;
+extern Module<> sysPrxForUser;
 
 void sys_game_process_exitspawn(vm::cptr<char> path, u32 argv_addr, u32 envp_addr, u32 data_addr, u32 data_size, u32 prio, u64 flags)
 {
@@ -62,15 +62,15 @@ void sys_game_process_exitspawn(vm::cptr<char> path, u32 argv_addr, u32 envp_add
 		}
 	}
 
-	//TODO: execute the file in <path> with the args in argv
-	//and the environment parameters in envp and copy the data
-	//from data_addr into the adress space of the new process
-	//then kill the current process
+	// TODO: execute the file in <path> with the args in argv
+	// and the environment parameters in envp and copy the data
+	// from data_addr into the adress space of the new process
+	// then kill the current process
 
 	Emu.Pause();
 	sysPrxForUser.Success("Process finished");
 
-	CallAfter([=]()
+	Emu.CallAfter([=]()
 	{
 		Emu.Stop();
 
@@ -138,15 +138,15 @@ void sys_game_process_exitspawn2(vm::cptr<char> path, u32 argv_addr, u32 envp_ad
 		}
 	}
 
-	//TODO: execute the file in <path> with the args in argv
-	//and the environment parameters in envp and copy the data
-	//from data_addr into the adress space of the new process
-	//then kill the current process
+	// TODO: execute the file in <path> with the args in argv
+	// and the environment parameters in envp and copy the data
+	// from data_addr into the adress space of the new process
+	// then kill the current process
 
 	Emu.Pause();
 	sysPrxForUser.Success("Process finished");
 
-	CallAfter([=]()
+	Emu.CallAfter([=]()
 	{
 		Emu.Stop();
 

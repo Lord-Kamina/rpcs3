@@ -4,7 +4,7 @@
 #include "Emu/SysCalls/ModuleManager.h"
 #include "Emu/SysCalls/Modules.h"
 
-extern Module cellSysmodule;
+extern Module<> cellSysmodule;
 
 enum
 {
@@ -156,7 +156,7 @@ s32 cellSysmoduleLoadModule(u16 id)
 		return CELL_SYSMODULE_ERROR_UNKNOWN;
 	}
 
-	if (Module* m = Emu.GetModuleManager().GetModuleById(id))
+	if (Module<>* m = Emu.GetModuleManager().GetModuleById(id))
 	{
 		// CELL_SYSMODULE_ERROR_DUPLICATED shouldn't be returned
 		m->Load();
@@ -174,7 +174,7 @@ s32 cellSysmoduleUnloadModule(u16 id)
 		return CELL_SYSMODULE_ERROR_UNKNOWN;
 	}
 
-	if (Module* m = Emu.GetModuleManager().GetModuleById(id))
+	if (Module<>* m = Emu.GetModuleManager().GetModuleById(id))
 	{
 		if (!m->IsLoaded())
 		{
@@ -194,14 +194,15 @@ s32 cellSysmoduleIsLoaded(u16 id)
 
 	if (!Emu.GetModuleManager().CheckModuleId(id))
 	{
+		cellSysmodule.Error("cellSysmoduleIsLoaded(): unknown module (id=0x%04x)", id);
 		return CELL_SYSMODULE_ERROR_UNKNOWN;
 	}
 
-	if (Module* m = Emu.GetModuleManager().GetModuleById(id))
+	if (Module<>* m = Emu.GetModuleManager().GetModuleById(id))
 	{
 		if (!m->IsLoaded())
 		{
-			cellSysmodule.Error("cellSysmoduleIsLoaded() failed: module not loaded (id=0x%04x)", id);
+			cellSysmodule.Warning("cellSysmoduleIsLoaded(): module not loaded (id=0x%04x)", id);
 			return CELL_SYSMODULE_ERROR_UNLOADED;
 		}
 	}
@@ -209,7 +210,7 @@ s32 cellSysmoduleIsLoaded(u16 id)
 	return CELL_SYSMODULE_LOADED;
 }
 
-Module cellSysmodule("cellSysmodule", []()
+Module<> cellSysmodule("cellSysmodule", []()
 {
 	REG_FUNC(cellSysmodule, cellSysmoduleInitialize);
 	REG_FUNC(cellSysmodule, cellSysmoduleFinalize);

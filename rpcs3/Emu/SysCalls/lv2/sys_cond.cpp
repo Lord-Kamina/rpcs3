@@ -5,6 +5,7 @@
 #include "Emu/SysCalls/SysCalls.h"
 
 #include "Emu/Cell/PPUThread.h"
+#include "sys_sync.h"
 #include "sys_mutex.h"
 #include "sys_cond.h"
 
@@ -38,14 +39,14 @@ s32 sys_cond_create(vm::ptr<u32> cond_id, u32 mutex_id, vm::ptr<sys_cond_attribu
 
 	LV2_LOCK;
 
-	const auto mutex = Emu.GetIdManager().get<lv2_mutex_t>(mutex_id);
+	const auto mutex = idm::get<lv2_mutex_t>(mutex_id);
 
 	if (!mutex)
 	{
 		return CELL_ESRCH;
 	}
 
-	if (attr->pshared != SYS_SYNC_NOT_PROCESS_SHARED || attr->ipc_key.data() || attr->flags.data())
+	if (attr->pshared != SYS_SYNC_NOT_PROCESS_SHARED || attr->ipc_key || attr->flags)
 	{
 		sys_cond.Error("sys_cond_create(): unknown attributes (pshared=0x%x, ipc_key=0x%llx, flags=0x%x)", attr->pshared, attr->ipc_key, attr->flags);
 		return CELL_EINVAL;
@@ -56,7 +57,7 @@ s32 sys_cond_create(vm::ptr<u32> cond_id, u32 mutex_id, vm::ptr<sys_cond_attribu
 		throw EXCEPTION("Unexpected cond_count");
 	}
 
-	*cond_id = Emu.GetIdManager().make<lv2_cond_t>(mutex, attr->name_u64);
+	*cond_id = idm::make<lv2_cond_t>(mutex, attr->name_u64);
 
 	return CELL_OK;
 }
@@ -67,7 +68,7 @@ s32 sys_cond_destroy(u32 cond_id)
 
 	LV2_LOCK;
 
-	const auto cond = Emu.GetIdManager().get<lv2_cond_t>(cond_id);
+	const auto cond = idm::get<lv2_cond_t>(cond_id);
 
 	if (!cond)
 	{
@@ -84,7 +85,7 @@ s32 sys_cond_destroy(u32 cond_id)
 		throw EXCEPTION("Unexpected cond_count");
 	}
 
-	Emu.GetIdManager().remove<lv2_cond_t>(cond_id);
+	idm::remove<lv2_cond_t>(cond_id);
 
 	return CELL_OK;
 }
@@ -95,7 +96,7 @@ s32 sys_cond_signal(u32 cond_id)
 
 	LV2_LOCK;
 
-	const auto cond = Emu.GetIdManager().get<lv2_cond_t>(cond_id);
+	const auto cond = idm::get<lv2_cond_t>(cond_id);
 
 	if (!cond)
 	{
@@ -118,7 +119,7 @@ s32 sys_cond_signal_all(u32 cond_id)
 
 	LV2_LOCK;
 
-	const auto cond = Emu.GetIdManager().get<lv2_cond_t>(cond_id);
+	const auto cond = idm::get<lv2_cond_t>(cond_id);
 
 	if (!cond)
 	{
@@ -142,7 +143,7 @@ s32 sys_cond_signal_to(u32 cond_id, u32 thread_id)
 
 	LV2_LOCK;
 
-	const auto cond = Emu.GetIdManager().get<lv2_cond_t>(cond_id);
+	const auto cond = idm::get<lv2_cond_t>(cond_id);
 
 	if (!cond)
 	{
@@ -175,7 +176,7 @@ s32 sys_cond_wait(PPUThread& ppu, u32 cond_id, u64 timeout)
 
 	LV2_LOCK;
 
-	const auto cond = Emu.GetIdManager().get<lv2_cond_t>(cond_id);
+	const auto cond = idm::get<lv2_cond_t>(cond_id);
 
 	if (!cond)
 	{
@@ -214,7 +215,7 @@ s32 sys_cond_wait(PPUThread& ppu, u32 cond_id, u64 timeout)
 				// try to reown mutex and exit if timed out
 				if (!cond->mutex->owner)
 				{
-					cond->mutex->owner = ppu.shared_from_this();
+					cond->mutex->owner = std::static_pointer_cast<CPUThread>(ppu.shared_from_this());
 					break;
 				}
 

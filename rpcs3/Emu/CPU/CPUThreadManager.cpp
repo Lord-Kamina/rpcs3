@@ -1,7 +1,6 @@
 #include "stdafx.h"
 #include "Emu/Memory/Memory.h"
 #include "Emu/System.h"
-#include "Emu/DbgCommand.h"
 #include "Emu/IdManager.h"
 
 #include "Emu/Cell/PPUThread.h"
@@ -32,22 +31,22 @@ std::vector<std::shared_ptr<CPUThread>> CPUThreadManager::GetAllThreads()
 {
 	std::vector<std::shared_ptr<CPUThread>> result;
 
-	for (auto& t : Emu.GetIdManager().get_all<PPUThread>())
+	for (auto& t : idm::get_all<PPUThread>())
 	{
 		result.emplace_back(t);
 	}
 
-	for (auto& t : Emu.GetIdManager().get_all<SPUThread>())
+	for (auto& t : idm::get_all<SPUThread>())
 	{
 		result.emplace_back(t);
 	}
 
-	for (auto& t : Emu.GetIdManager().get_all<RawSPUThread>())
+	for (auto& t : idm::get_all<RawSPUThread>())
 	{
 		result.emplace_back(t);
 	}
 
-	for (auto& t : Emu.GetIdManager().get_all<ARMv7Thread>())
+	for (auto& t : idm::get_all<ARMv7Thread>())
 	{
 		result.emplace_back(t);
 	}
@@ -57,12 +56,12 @@ std::vector<std::shared_ptr<CPUThread>> CPUThreadManager::GetAllThreads()
 
 void CPUThreadManager::Exec()
 {
-	for (auto& t : Emu.GetIdManager().get_all<PPUThread>())
+	for (auto& t : idm::get_all<PPUThread>())
 	{
 		t->exec();
 	}
 
-	for (auto& t : Emu.GetIdManager().get_all<ARMv7Thread>())
+	for (auto& t : idm::get_all<ARMv7Thread>())
 	{
 		t->exec();
 	}
@@ -78,11 +77,11 @@ std::shared_ptr<RawSPUThread> CPUThreadManager::NewRawSPUThread()
 	{
 		if (m_raw_spu[i].expired())
 		{
-			m_raw_spu[i] = result = Emu.GetIdManager().make_ptr<RawSPUThread>(std::to_string(i), i);
+			m_raw_spu[i] = result = idm::make_ptr<RawSPUThread>(std::to_string(i), i);
 			break;
 		}
 	}
-
+	
 	return result;
 }
 

@@ -1,11 +1,10 @@
 #include "stdafx.h"
-#include "Utilities/Log.h"
 #include "Emu/Memory/Memory.h"
 #include "Emu/System.h"
 #include "Emu/SysCalls/Modules.h"
 #include "Emu/Cell/PPUInstrTable.h"
 
-extern Module sys_libc;
+extern Module<> sys_libc;
 
 std::string ps3_fmt(PPUThread& context, vm::cptr<char> fmt, u32 g_count, u32 f_count, u32 v_count)
 {
@@ -160,7 +159,7 @@ namespace sys_libc_func
 	}
 }
 
-extern Module sysPrxForUser;
+extern Module<> sysPrxForUser;
 
 vm::ptr<void> _sys_memset(vm::ptr<void> dst, s32 value, u32 size)
 {
@@ -413,7 +412,7 @@ void sysPrxForUser_sys_libc_init()
 	REG_FUNC(sysPrxForUser, _sys_qsort);
 }
 
-Module sys_libc("sys_libc", []()
+Module<> sys_libc("sys_libc", []()
 {
 	using namespace PPU_instr;
 

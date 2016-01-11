@@ -1,15 +1,14 @@
 #include "stdafx.h"
-#include "rpcs3/Ini.h"
-#include "Utilities/Log.h"
 #include "Emu/System.h"
+#include "Emu/state.h"
 #include "LogBase.h"
 
 bool LogBase::CheckLogging() const
 {
-	return Ini.HLELogging.GetValue() || m_logging;
+	return rpcs3::config.misc.log.hle_logging.value() || m_logging;
 }
 
-void LogBase::LogOutput(LogType type, const std::string& text) const
+void LogBase::LogOutput(LogType type, std::string text) const
 {
 	switch (type)
 	{

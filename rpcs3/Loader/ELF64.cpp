@@ -1,22 +1,19 @@
 #include "stdafx.h"
-#include "Utilities/Log.h"
 #include "Emu/FS/vfsStream.h"
 #include "Emu/FS/vfsFile.h"
 #include "Emu/FS/vfsDir.h"
 #include "Emu/Memory/Memory.h"
+#include "Emu/IdManager.h"
 #include "Emu/System.h"
+#include "Emu/state.h"
 #include "Emu/SysCalls/SysCalls.h"
 #include "Emu/SysCalls/Modules.h"
 #include "Emu/SysCalls/ModuleManager.h"
 #include "Emu/SysCalls/lv2/sys_prx.h"
 #include "Emu/Cell/PPUInstrTable.h"
 #include "ELF64.h"
-#include "Ini.h"
 
 using namespace PPU_instr;
-
-extern void initialize_ppu_exec_map();
-extern void fill_ppu_exec_map(u32 addr, u32 size);
 
 namespace loader
 {
@@ -134,7 +131,7 @@ namespace loader
 							info.name = std::string(module_info.name, 28);
 							info.rtoc = module_info.toc + segment.begin.addr();
 
-							LOG_WARNING(LOADER, "%s (rtoc=%x):", info.name, info.rtoc);
+							LOG_WARNING(LOADER, "%s (rtoc=0x%x):", info.name, info.rtoc);
 
 							sys_prx_library_info_t lib;
 							for (u32 e = module_info.exports_start.addr();
@@ -150,7 +147,7 @@ namespace loader
 									char name[27];
 									m_stream->Seek(handler::get_stream_offset() + phdr.p_offset + lib.name_addr);
 									m_stream->Read(name, sizeof(name));
-									modulename = std::string(name);
+									modulename = name;
 									LOG_WARNING(LOADER, "**** Exported: %s", name);
 								}
 
@@ -169,8 +166,8 @@ namespace loader
 
 									module.exports[fnid] = fstub;
 
-									//LOG_NOTICE(LOADER, "Exported function '%s' in '%s' module  (LLE)", SysCalls::GetFuncName(fnid).c_str(), module_name.c_str());
-									LOG_WARNING(LOADER, "**** %s: [%s] -> 0x%x", modulename.c_str(), SysCalls::GetFuncName(fnid).c_str(), (u32)fstub);
+									//LOG_NOTICE(LOADER, "Exported function '%s' in '%s' module  (LLE)", get_ps3_function_name(fnid), module_name);
+									LOG_WARNING(LOADER, "**** %s: [%s] -> 0x%x", modulename, get_ps3_function_name(fnid), (u32)fstub);
 								}
 							}
 
@@ -187,7 +184,7 @@ namespace loader
 									char name[27];
 									m_stream->Seek(handler::get_stream_offset() + phdr.p_offset + lib.name_addr);
 									m_stream->Read(name, sizeof(name));
-									modulename = std::string(name);
+									modulename = name;
 									LOG_WARNING(LOADER, "**** Imported: %s", name);
 								}
 
@@ -206,7 +203,7 @@ namespace loader
 
 									module.imports[fnid] = fstub;
 
-									LOG_WARNING(LOADER, "**** %s: [%s] -> 0x%x", modulename.c_str(), SysCalls::GetFuncName(fnid).c_str(), (u32)fstub);
+									LOG_WARNING(LOADER, "**** %s: [%s] -> 0x%x", modulename, get_ps3_function_name(fnid), (u32)fstub);
 								}
 							}
 						}
@@ -311,6 +308,7 @@ namespace loader
 
 			//store elf to memory
 			vm::ps3::init();
+			Emu.GetModuleManager().Init();
 
 			error_code res = alloc_memory(0);
 			if (res != ok)
@@ -332,6 +330,14 @@ namespace loader
 					continue;
 				}
 
+				if (rpcs3::state.config.core.load_liblv2.value())
+				{
+					if (module->name != "liblv2.sprx")
+					{
+						continue;
+					}
+				}
+
 				elf64 sprx_handler;
 
 				vfsFile fsprx(lle_dir.GetPath() + "/" + module->name);
@@ -342,18 +348,15 @@ namespace loader
 
 					if (sprx_handler.is_sprx())
 					{
-						IniEntry<bool> load_lib;
-						load_lib.Init(sprx_handler.sprx_get_module_name(), "LLE");
+						if (!rpcs3::state.config.core.load_liblv2.value())
+						{
+							if (rpcs3::config.lle.get_entry_value<bool>(sprx_handler.sprx_get_module_name(), false) == false)
+							{
+								continue;
+							}
+						}
 
-						if (!load_lib.LoadValue(false))
-						{
-							LOG_WARNING(LOADER, "Skipped LLE library '%s'", sprx_handler.sprx_get_module_name().c_str());
-							continue;
-						}
-						else
-						{
-							LOG_WARNING(LOADER, "Loading LLE library '%s'", sprx_handler.sprx_get_module_name().c_str());
-						}
+						LOG_WARNING(LOADER, "Loading LLE library '%s'", sprx_handler.sprx_get_module_name().c_str());
 
 						sprx_info info;
 						sprx_handler.load_sprx(info);
@@ -412,7 +415,7 @@ namespace loader
 								continue;
 							}
 
-							Module* module = Emu.GetModuleManager().GetModuleByName(m.first.c_str());
+							Module<>* module = Emu.GetModuleManager().GetModuleByName(m.first.c_str());
 
 							if (!module)
 							{
@@ -442,7 +445,7 @@ namespace loader
 
 										if (!vm::check_addr(addr, 8) || !vm::check_addr(i_addr = vm::read32(addr), 4))
 										{
-											LOG_ERROR(LOADER, "Failed to inject code for exported function '%s' (opd=0x%x, 0x%x)", SysCalls::GetFuncName(nid), addr, i_addr);
+											LOG_ERROR(LOADER, "Failed to inject code for exported function '%s' (opd=0x%x, 0x%x)", get_ps3_function_name(nid), addr, i_addr);
 										}
 										else
 										{
@@ -463,18 +466,18 @@ namespace loader
 
 								if (!func)
 								{
-									LOG_ERROR(LOADER, "Unknown function '%s' (0x%x)", SysCalls::GetFuncName(nid), addr);
+									LOG_ERROR(LOADER, "Unknown function '%s' (0x%x)", get_ps3_function_name(nid), addr);
 
 									index = add_ppu_func(ModuleFunc(nid, 0, module, nullptr, nullptr));
 								}
 								else
 								{
-									LOG_NOTICE(LOADER, "Imported function '%s' (0x%x)", SysCalls::GetFuncName(nid), addr);
+									LOG_NOTICE(LOADER, "Imported function '%s' (0x%x)", get_ps3_function_name(nid), addr);
 								}
 
 								if (!patch_ppu_import(addr, index))
 								{
-									LOG_ERROR(LOADER, "Failed to inject code for function '%s' (0x%x)", SysCalls::GetFuncName(nid), addr);
+									LOG_ERROR(LOADER, "Failed to inject code for function '%s' (0x%x)", get_ps3_function_name(nid), addr);
 								}
 							}
 						}
@@ -499,6 +502,8 @@ namespace loader
 			ppu_thr_stop_data[0] = SC(3);
 			ppu_thr_stop_data[1] = BLR();
 			Emu.SetCPUThreadStop(ppu_thr_stop_data.addr());
+
+			Emu.GetModuleManager().Alloc();
 
 			static const int branch_size = 8 * 4;
 
@@ -549,20 +554,21 @@ namespace loader
 			// branch to initialization
 			make_branch(entry, m_ehdr.e_entry);
 
+			const auto decoder_cache = fxm::make<ppu_decoder_cache_t>();
+
+			for (u32 page = 0; page < 0x20000000; page += 4096)
+			{
+				// TODO: scan only executable areas
+				if (vm::check_addr(page, 4096))
+				{
+					decoder_cache->initialize(page, 4096);
+				}
+			}
+
 			ppu_thread main_thread(OPD.addr(), "main_thread");
 
 			main_thread.args({ Emu.GetPath()/*, "-emu"*/ }).run();
 			main_thread.gpr(11, OPD.addr()).gpr(12, Emu.GetMallocPageSize());
-
-			initialize_ppu_exec_map();
-
-			for (u32 page = 0; page < 0x20000000; page += 4096)
-			{
-				if (vm::check_addr(page, 4096))
-				{
-					fill_ppu_exec_map(page, 4096);
-				}
-			}
 
 			return ok;
 		}
@@ -607,9 +613,9 @@ namespace loader
 							m_stream->Seek(handler::get_stream_offset() + phdr.p_offset);
 							m_stream->Read(phdr.p_vaddr.get_ptr(), phdr.p_filesz);
 
-							if (Ini.HookStFunc.GetValue())
+							if (rpcs3::state.config.core.hook_st_func.value())
 							{
-								hook_ppu_funcs(vm::static_ptr_cast<be_t<u32>>(phdr.p_vaddr), phdr.p_filesz / 4);
+								hook_ppu_funcs(vm::static_ptr_cast<u32>(phdr.p_vaddr), phdr.p_filesz / 4);
 							}
 						}
 					}
@@ -658,7 +664,7 @@ namespace loader
 							LOG_NOTICE(LOADER, "*** ppc seg: 0x%x", info.ppc_seg);
 							//LOG_NOTICE(LOADER, "*** crash dump param addr: 0x%x", info.crash_dump_param_addr);
 
-							Emu.SetParams(info.sdk_version, info.malloc_pagesize, info.primary_stacksize, info.primary_prio);
+							Emu.SetParams(info.sdk_version, info.malloc_pagesize, std::max<u32>(info.primary_stacksize, 0x4000), info.primary_prio);
 						}
 					}
 					break;
@@ -680,7 +686,7 @@ namespace loader
 						{
 							const std::string module_name = stub->s_modulename.get_ptr();
 
-							Module* module = Emu.GetModuleManager().GetModuleByName(module_name.c_str());
+							Module<>* module = Emu.GetModuleManager().GetModuleByName(module_name.c_str());
 
 							if (!module)
 							{
@@ -698,7 +704,7 @@ namespace loader
 
 								if (!func)
 								{
-									LOG_ERROR(LOADER, "Unknown function '%s' in '%s' module (0x%x)", SysCalls::GetFuncName(nid), module_name, addr);
+									LOG_ERROR(LOADER, "Unknown function '%s' in '%s' module (0x%x)", get_ps3_function_name(nid), module_name, addr);
 
 									index = add_ppu_func(ModuleFunc(nid, 0, module, nullptr, nullptr));
 								}
@@ -706,7 +712,7 @@ namespace loader
 								{
 									const bool is_lle = func->lle_func && !(func->flags & MFF_FORCED_HLE);
 
-									LOG_NOTICE(LOADER, "Imported %sfunction '%s' in '%s' module (0x%x)", is_lle ? "LLE " : "", SysCalls::GetFuncName(nid), module_name, addr);
+									LOG_NOTICE(LOADER, "Imported %sfunction '%s' in '%s' module (0x%x)", is_lle ? "LLE " : "", get_ps3_function_name(nid), module_name, addr);
 								}
 
 								if (!patch_ppu_import(addr, index))

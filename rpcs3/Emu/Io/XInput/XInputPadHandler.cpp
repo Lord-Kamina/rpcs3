@@ -1,6 +1,6 @@
+#include "stdafx.h"
 #include "stdafx_gui.h"
-#if defined (_WIN32)
-#include "Utilities/Log.h"
+#ifdef _MSC_VER
 #include "XInputPadHandler.h"
 
 namespace {

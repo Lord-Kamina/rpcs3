@@ -16,10 +16,8 @@
 
 SysCallBase sys_prx("sys_prx");
 
-extern void fill_ppu_exec_map(u32 addr, u32 size);
-
 lv2_prx_t::lv2_prx_t()
-	: id(Emu.GetIdManager().get_current_id())
+	: id(idm::get_last_id())
 {
 }
 
@@ -43,7 +41,7 @@ s32 prx_load_module(std::string path, u64 flags, vm::ptr<sys_prx_load_module_opt
 	loader::handlers::elf64::sprx_info info;
 	loader.load_sprx(info);
 
-	auto prx = Emu.GetIdManager().make_ptr<lv2_prx_t>();
+	auto prx = idm::make_ptr<lv2_prx_t>();
 
 	auto meta = info.modules[""];
 	prx->start.set(meta.exports[0xBC9A0086]);
@@ -55,7 +53,7 @@ s32 prx_load_module(std::string path, u64 flags, vm::ptr<sys_prx_load_module_opt
 		if (module_.first == "")
 			continue;
 
-		Module* module = Emu.GetModuleManager().GetModuleByName(module_.first.c_str());
+		Module<>* module = Emu.GetModuleManager().GetModuleByName(module_.first.c_str());
 
 		if (!module)
 		{
@@ -85,7 +83,7 @@ s32 prx_load_module(std::string path, u64 flags, vm::ptr<sys_prx_load_module_opt
 
 					if (!vm::check_addr(addr, 8) || !vm::check_addr(i_addr = vm::read32(addr), 4))
 					{
-						sys_prx.Error("Failed to inject code for exported function '%s' (opd=0x%x, 0x%x)", SysCalls::GetFuncName(nid), addr, i_addr);
+						sys_prx.Error("Failed to inject code for exported function '%s' (opd=0x%x, 0x%x)", get_ps3_function_name(nid), addr, i_addr);
 					}
 					else
 					{
@@ -106,7 +104,7 @@ s32 prx_load_module(std::string path, u64 flags, vm::ptr<sys_prx_load_module_opt
 
 			if (!func)
 			{
-				sys_prx.Error("Unknown function '%s' in '%s' module (0x%x)", SysCalls::GetFuncName(nid), module_.first);
+				sys_prx.Error("Unknown function '%s' in '%s' module (0x%x)", get_ps3_function_name(nid), module_.first);
 
 				index = add_ppu_func(ModuleFunc(nid, 0, module, nullptr, nullptr));
 			}
@@ -114,7 +112,7 @@ s32 prx_load_module(std::string path, u64 flags, vm::ptr<sys_prx_load_module_opt
 			{
 				const bool is_lle = func->lle_func && !(func->flags & MFF_FORCED_HLE);
 
-				sys_prx.Error("Imported %sfunction '%s' in '%s' module (0x%x)", (is_lle ? "LLE " : ""), SysCalls::GetFuncName(nid), module_.first, addr);
+				sys_prx.Error("Imported %sfunction '%s' in '%s' module (0x%x)", (is_lle ? "LLE " : ""), get_ps3_function_name(nid), module_.first, addr);
 			}
 
 			if (!patch_ppu_import(addr, index))
@@ -124,6 +122,8 @@ s32 prx_load_module(std::string path, u64 flags, vm::ptr<sys_prx_load_module_opt
 		}
 	}
 
+	const auto decoder_cache = fxm::get<ppu_decoder_cache_t>();
+
 	for (auto& seg : info.segments)
 	{
 		const u32 addr = seg.begin.addr();
@@ -131,7 +131,7 @@ s32 prx_load_module(std::string path, u64 flags, vm::ptr<sys_prx_load_module_opt
 
 		if (vm::check_addr(addr, size))
 		{
-			fill_ppu_exec_map(addr, size);
+			decoder_cache->initialize(addr, size);
 		}
 		else
 		{
@@ -190,7 +190,7 @@ s32 sys_prx_start_module(s32 id, u64 flags, vm::ptr<sys_prx_start_module_option_
 {
 	sys_prx.Warning("sys_prx_start_module(id=0x%x, flags=0x%llx, pOpt=*0x%x)", id, flags, pOpt);
 
-	const auto prx = Emu.GetIdManager().get<lv2_prx_t>(id);
+	const auto prx = idm::get<lv2_prx_t>(id);
 
 	if (!prx)
 	{
@@ -210,7 +210,7 @@ s32 sys_prx_stop_module(s32 id, u64 flags, vm::ptr<sys_prx_stop_module_option_t>
 {
 	sys_prx.Warning("sys_prx_stop_module(id=0x%x, flags=0x%llx, pOpt=*0x%x)", id, flags, pOpt);
 
-	const auto prx = Emu.GetIdManager().get<lv2_prx_t>(id);
+	const auto prx = idm::get<lv2_prx_t>(id);
 
 	if (!prx)
 	{
@@ -231,7 +231,7 @@ s32 sys_prx_unload_module(s32 id, u64 flags, vm::ptr<sys_prx_unload_module_optio
 	sys_prx.Warning("sys_prx_unload_module(id=0x%x, flags=0x%llx, pOpt=*0x%x)", id, flags, pOpt);
 
 	// Get the PRX, free the used memory and delete the object and its ID
-	const auto prx = Emu.GetIdManager().get<lv2_prx_t>(id);
+	const auto prx = idm::get<lv2_prx_t>(id);
 
 	if (!prx)
 	{
@@ -241,7 +241,7 @@ s32 sys_prx_unload_module(s32 id, u64 flags, vm::ptr<sys_prx_unload_module_optio
 	//Memory.Free(prx->address);
 
 	//s32 result = prx->exit ? prx->exit() : CELL_OK;
-	Emu.GetIdManager().remove<lv2_prx_t>(id);
+	idm::remove<lv2_prx_t>(id);
 	
 	return CELL_OK;
 }

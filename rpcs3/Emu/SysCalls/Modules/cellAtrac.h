@@ -36,7 +36,7 @@ enum : s32
 	CELL_ATRAC_LOOP_STREAM_DATA_IS_ON_MEMORY    = -3,
 };
 
-struct set_alignment(8) CellAtracHandle
+struct alignas(8) CellAtracHandle
 {
 	vm::ptr<u8> pucWorkMem;
 	// ...
@@ -58,4 +58,4 @@ struct CellAtracExtRes
 	u8 priority[8];
 };
 
-extern Module cellAtrac;
+extern Module<> cellAtrac;

@@ -24,234 +24,17 @@
 #endif
 
 namespace ppu_recompiler_llvm {
+	enum ExecutionStatus
+	{
+		ExecutionStatusReturn = 0, ///< Block has hit a return, caller can continue execution
+		ExecutionStatusBlockEnded, ///< Block has been executed but no return was hit, at least another block must be executed before caller can continue
+		ExecutionStatusPropagateException, ///< an exception was thrown
+	};
+
 	class Compiler;
 	class RecompilationEngine;
-	class Tracer;
 	class ExecutionEngine;
 	struct PPUState;
-
-	/// An entry in an execution trace
-	struct ExecutionTraceEntry {
-		/// Data associated with the entry. This is discriminated by type.
-		union {
-			struct Instruction {
-				u32 address;
-			} instruction;
-
-			struct FunctionCall {
-				u32 address;
-			} function_call;
-
-			struct CompiledBlock {
-				u32 entry_address;
-				u32 exit_address;
-			} compiled_block;
-		} data;
-
-		/// The type of the entry
-		enum class Type {
-			FunctionCall,
-			Instruction,
-			CompiledBlock,
-		} type;
-
-		ExecutionTraceEntry(Type type, u32 arg1, u32 arg2 = 0)
-			: type(type) {
-			switch (type) {
-			case Type::Instruction:
-				data.instruction.address = arg1;
-				break;
-			case Type::FunctionCall:
-				data.function_call.address = arg1;
-				break;
-			case Type::CompiledBlock:
-				data.compiled_block.entry_address = arg1;
-				data.compiled_block.exit_address = arg2;
-				break;
-			default:
-				assert(0);
-				break;
-			}
-		}
-
-		u32 GetPrimaryAddress() const {
-			switch (type) {
-			case Type::Instruction:
-				return data.instruction.address;
-			case Type::FunctionCall:
-				return data.function_call.address;
-			case Type::CompiledBlock:
-				return data.compiled_block.entry_address;
-			default:
-				assert(0);
-				return 0;
-			}
-		}
-
-		std::string ToString() const {
-			switch (type) {
-			case Type::Instruction:
-				return fmt::Format("I:0x%08X", data.instruction.address);
-			case Type::FunctionCall:
-				return fmt::Format("F:0x%08X", data.function_call.address);
-			case Type::CompiledBlock:
-				return fmt::Format("C:0x%08X-0x%08X", data.compiled_block.entry_address, data.compiled_block.exit_address);
-			default:
-				assert(0);
-				return "";
-			}
-		}
-
-		u64 hash() const {
-			u64 hash = ((u64)type << 32);
-			switch (type) {
-			case Type::Instruction:
-				hash |= data.instruction.address;
-				break;
-			case Type::FunctionCall:
-				hash |= data.function_call.address;
-				break;
-			case Type::CompiledBlock:
-				hash = data.compiled_block.exit_address;
-				hash <<= 32;
-				hash |= data.compiled_block.entry_address;
-				break;
-			default:
-				assert(0);
-				break;
-			}
-
-			return hash;
-		}
-	};
-
-	/// An execution trace.
-	struct ExecutionTrace {
-		/// Unique id of an execution trace;
-		typedef u64 Id;
-
-		/// The function to which this trace belongs
-		u32 function_address;
-
-		/// Execution trace type
-		enum class Type {
-			Linear,
-			Loop,
-		} type;
-
-		/// entries in the trace
-		std::vector<ExecutionTraceEntry> entries;
-
-		ExecutionTrace(u32 address)
-			: function_address(address) {
-		}
-
-		std::string ToString() const {
-			auto s = fmt::Format("0x%08X %s ->", function_address, type == ExecutionTrace::Type::Loop ? "Loop" : "Linear");
-			for (auto i = 0; i < entries.size(); i++) {
-				s += " " + entries[i].ToString();
-			}
-
-			return s;
-		}
-
-		Id GetId() const {
-			Id id = 0;
-
-			for (auto i = entries.begin(); i != entries.end(); i++) {
-				id ^= i->hash();
-				id <<= 1;
-			}
-
-			return id;
-		}
-	};
-
-	/// A control flow graph
-	struct ControlFlowGraph {
-		/// Address of the first instruction
-		u32 start_address;
-
-		/// Address of the function to which this CFG belongs to
-		u32 function_address;
-
-		/// Set of addresses of the instructions in the CFG
-		std::set<u32> instruction_addresses;
-
-		/// Branches in the CFG.
-		/// Key is the address of an instruction
-		/// Data is the set of all instructions to which this instruction branches to.
-		std::map<u32, std::set<u32>> branches;
-
-		/// Function calls in the CFG
-		/// Key is the address of an instruction
-		/// Data is the set of all functions which this instruction invokes.
-		std::map<u32, std::set<u32>> calls;
-
-		ControlFlowGraph(u32 start_address, u32 function_address)
-			: start_address(start_address)
-			, function_address(function_address) {
-		}
-
-		void operator += (const ControlFlowGraph & other) {
-			for (auto i = other.instruction_addresses.begin(); i != other.instruction_addresses.end(); i++) {
-				instruction_addresses.insert(*i);
-			}
-
-			for (auto i = other.branches.begin(); i != other.branches.end(); i++) {
-				auto j = branches.find(i->first);
-				if (j == branches.end()) {
-					j = branches.insert(branches.begin(), std::make_pair(i->first, std::set<u32>()));
-				}
-
-				for (auto k = i->second.begin(); k != i->second.end(); k++) {
-					j->second.insert(*k);
-				}
-			}
-
-			for (auto i = other.calls.begin(); i != other.calls.end(); i++) {
-				auto j = calls.find(i->first);
-				if (j == calls.end()) {
-					j = calls.insert(calls.begin(), std::make_pair(i->first, std::set<u32>()));
-				}
-
-				for (auto k = i->second.begin(); k != i->second.end(); k++) {
-					j->second.insert(*k);
-				}
-			}
-		}
-
-		std::string ToString() const {
-			auto s = fmt::Format("0x%08X (0x%08X): Size=%u ->", start_address, function_address, GetSize());
-			for (auto i = instruction_addresses.begin(); i != instruction_addresses.end(); i++) {
-				s += fmt::Format(" 0x%08X", *i);
-			}
-
-			s += "\nBranches:";
-			for (auto i = branches.begin(); i != branches.end(); i++) {
-				s += fmt::Format("\n0x%08X ->", i->first);
-				for (auto j = i->second.begin(); j != i->second.end(); j++) {
-					s += fmt::Format(" 0x%08X", *j);
-				}
-			}
-
-			s += "\nCalls:";
-			for (auto i = calls.begin(); i != calls.end(); i++) {
-				s += fmt::Format("\n0x%08X ->", i->first);
-				for (auto j = i->second.begin(); j != i->second.end(); j++) {
-					s += fmt::Format(" 0x%08X", *j);
-				}
-			}
-
-			return s;
-		}
-
-		/// Get the size of the CFG. The size is a score of how large the CFG is and increases everytime
-		/// a node or an edge is added to the CFG.
-		size_t GetSize() const {
-			return instruction_addresses.size() + branches.size() + calls.size();
-		}
-	};
 
 	enum class BranchType {
 		NonBranch,
@@ -263,45 +46,22 @@ namespace ppu_recompiler_llvm {
 	/// Pointer to an executable
 	typedef u32(*Executable)(PPUThread * ppu_state, u64 context);
 
-	/// PPU compiler that uses LLVM for code generation and optimization
+	/// Parses PPU opcodes and translate them into llvm ir.
 	class Compiler : protected PPUOpcodes, protected PPCDecoder {
 	public:
-		struct Stats {
-			/// Time spent building the LLVM IR
-			std::chrono::nanoseconds ir_build_time;
+		Compiler(llvm::LLVMContext *context, llvm::IRBuilder<> *builder, std::unordered_map<std::string, void*> &function_ptrs);
 
-			/// Time spent optimizing
-			std::chrono::nanoseconds optimization_time;
-
-			/// Time spent translating LLVM IR to machine code
-			std::chrono::nanoseconds translation_time;
-
-			/// Total time
-			std::chrono::nanoseconds total_time;
-		};
-
-		Compiler(RecompilationEngine & recompilation_engine, const Executable execute_unknown_function,
-			const Executable execute_unknown_block, bool(*poll_status_function)(PPUThread * ppu_state));
-
-		Compiler(const Compiler & other) = delete;
-		Compiler(Compiler && other) = delete;
+		Compiler(const Compiler&) = delete; // Delete copy/move constructors and copy/move operators
 
 		virtual ~Compiler();
 
-		Compiler & operator = (const Compiler & other) = delete;
-		Compiler & operator = (Compiler && other) = delete;
+		/// Create a module setting target triples and some callbacks
+		static std::unique_ptr<llvm::Module> create_module(llvm::LLVMContext &llvm_context);
 
-		/**
-		 * Compile a code fragment described by a cfg and return an executable and the ExecutionEngine storing it
-		 * Pointer to function can be retrieved with getPointerToFunction
-		 */
-		std::pair<Executable, llvm::ExecutionEngine *> Compile(const std::string & name, const ControlFlowGraph & cfg, bool generate_linkable_exits);
+		/// Create a function called name in module and populates it by translating block at start_address with instruction_count length.
+		void translate_to_llvm_ir(llvm::Module *module, const std::string & name, u32 start_address, u32 instruction_count);
 
-		/// Retrieve compiler stats
-		Stats GetStats();
-
-		/// Execute all tests
-		void RunAllTests();
+		static void optimise_module(llvm::Module *module);
 
 	protected:
 		void Decode(const u32 code) override;
@@ -708,7 +468,10 @@ namespace ppu_recompiler_llvm {
 
 		void UNK(const u32 code, const u32 opcode, const u32 gcode) override;
 
-	private:
+		/// Utility function creating a function called name with Executable signature
+		void initiate_function(const std::string &name);
+
+	protected:
 		/// State of a compilation task
 		struct CompileTaskState {
 			enum Args {
@@ -723,9 +486,6 @@ namespace ppu_recompiler_llvm {
 			/// Args of the LLVM function
 			llvm::Value * args[MaxArgs];
 
-			/// The CFG being compiled
-			const ControlFlowGraph * cfg;
-
 			/// Address of the current instruction being compiled
 			u32 current_instruction_address;
 
@@ -733,16 +493,7 @@ namespace ppu_recompiler_llvm {
 			/// This is set to false at the start of compilation of an instruction.
 			/// If a branch instruction is encountered, this is set to true by the decode function.
 			bool hit_branch_instruction;
-
-			/// Create code such that exit points can be linked to other blocks
-			bool generate_linkable_exits;
 		};
-
-		/// Recompilation engine
-		RecompilationEngine & m_recompilation_engine;
-
-		/// The function that should be called to check the status of the thread
-		bool(*m_poll_status_function)(PPUThread * ppu_state);
 
 		/// The function that will be called to execute unknown functions
 		llvm::Function * m_execute_unknown_function;
@@ -751,7 +502,7 @@ namespace ppu_recompiler_llvm {
 		llvm::Function *  m_execute_unknown_block;
 
 		/// Maps function name to executable memory pointer
-		std::unordered_map<std::string, Executable> m_executableMap;
+		std::unordered_map<std::string, void*> &m_executable_map;
 
 		/// LLVM context
 		llvm::LLVMContext * m_llvm_context;
@@ -767,9 +518,6 @@ namespace ppu_recompiler_llvm {
 
 		/// State of the current compilation task
 		CompileTaskState m_state;
-
-		/// Compiler stats
-		Stats m_stats;
 
 		/// Get the name of the basic block for the specified address
 		std::string GetBasicBlockNameFromAddress(u32 address, const std::string & suffix = "") const;
@@ -956,31 +704,21 @@ namespace ppu_recompiler_llvm {
 		}
 
 		/// Call a function
-		template<class ReturnType, class Func, class... Args>
-		llvm::Value * Call(const char * name, Func function, Args... args) {
+		template<class ReturnType, class... Args>
+		llvm::Value * Call(const char * name, Args... args) {
 			auto fn = m_module->getFunction(name);
 			if (!fn) {
 				std::vector<llvm::Type *> fn_args_type = { args->getType()... };
 				auto fn_type = llvm::FunctionType::get(CppToLlvmType<ReturnType>(), fn_args_type, false);
 				fn = llvm::cast<llvm::Function>(m_module->getOrInsertFunction(name, fn_type));
 				fn->setCallingConv(llvm::CallingConv::X86_64_Win64);
-				// Note: not threadsafe
-				m_executableMap[name] = (Executable)(void *&)function;
+				// Create an entry in m_executable_map that will be populated outside of compiler
+				(void)m_executable_map[name];
 			}
 
 			std::vector<llvm::Value *> fn_args = { args... };
 			return m_ir_builder->CreateCall(fn, fn_args);
 		}
-
-		/// Indirect call
-		llvm::Value * IndirectCall(u32 address, llvm::Value * context_i64, bool is_function);
-
-		/// Test an instruction against the interpreter
-		template <class... Args>
-		void VerifyInstructionAgainstInterpreter(const char * name, void (Compiler::*recomp_fn)(Args...), void (PPUInterpreter::*interp_fn)(Args...), PPUState & input_state, Args... args);
-
-		/// Excute a test
-		void RunTest(const char * name, std::function<void()> test_case, std::function<void()> input, std::function<bool(std::string & msg)> check_result);
 
 		/// Handle compilation errors
 		void CompilationError(const std::string & error);
@@ -1003,36 +741,26 @@ namespace ppu_recompiler_llvm {
 	 * It then builds them asynchroneously and update the executable mapping
 	 * using atomic based locks to avoid undefined behavior.
 	 **/
-	class RecompilationEngine final : protected thread_t {
+	class RecompilationEngine final : public named_thread_t {
 		friend class CPUHybridDecoderRecompiler;
 	public:
 		virtual ~RecompilationEngine() override;
 
 		/**
-		 * Get the executable for the specified address
-		 * The pointer is always valid during the lifetime of RecompilationEngine
-		 * but the function pointed to can be updated.
-		 **/
-		const Executable *GetExecutable(u32 address, bool isFunction);
-
-		/**
-		 * Get a mutex for an address. Used to avoid modifying a block currently in execution.
-		 **/
-		std::pair<std::mutex, std::atomic<int> >* GetMutexAndCounterForAddress(u32 address);
-
-		/**
 		 * Get the executable for the specified address if a compiled version is
 		 * available, otherwise returns nullptr.
 		 **/
-		const Executable *GetCompiledExecutableIfAvailable(u32 address);
+		const Executable GetCompiledExecutableIfAvailable(u32 address) const;
 
-		/// Notify the recompilation engine about a newly detected trace. It takes ownership of the trace.
-		void NotifyTrace(ExecutionTrace * execution_trace);
+		/// Notify the recompilation engine about a newly detected block start.
+		void NotifyBlockStart(u32 address);
 
 		/// Log
 		llvm::raw_fd_ostream & Log();
 
-		void Task();
+		std::string get_name() const override { return "PPU Recompilation Engine"; }
+
+		void on_task() override;
 
 		/// Get a pointer to the instance of this class
 		static std::shared_ptr<RecompilationEngine> GetInstance();
@@ -1040,105 +768,109 @@ namespace ppu_recompiler_llvm {
 	private:
 		/// An entry in the block table
 		struct BlockEntry {
+			/// Start address
+			u32 address;
+
 			/// Number of times this block was hit
 			u32 num_hits;
 
-			/// The current revision number of this function
-			u32 revision;
-
-			/// Size of the CFG when it was last compiled
-			size_t last_compiled_cfg_size;
-
-			/// The CFG for this block
-			ControlFlowGraph cfg;
+			/// Indicates whether this function has been analysed or not
+			bool is_analysed;
 
 			/// Indicates whether the block has been compiled or not
 			bool is_compiled;
 
-			BlockEntry(u32 start_address, u32 function_address)
+			/// Indicate wheter the block is a function that can be completly compiled
+			/// that is, that has a clear "return" semantic and no indirect branch
+			bool is_compilable_function;
+
+			/// If the analysis was successfull, how long the block is.
+			u32 instructionCount;
+
+			/// If the analysis was successfull, which function does it call.
+			std::set<u32> calledFunctions;
+
+			BlockEntry(u32 start_address)
 				: num_hits(0)
-				, revision(0)
-				, last_compiled_cfg_size(0)
+				, address(start_address)
 				, is_compiled(false)
-				, cfg(start_address, function_address) {
+				, is_analysed(false)
+				, is_compilable_function(false)
+				, instructionCount(0) {
 			}
 
 			std::string ToString() const {
-				return fmt::Format("0x%08X (0x%08X): NumHits=%u, Revision=%u, LastCompiledCfgSize=%u, IsCompiled=%c",
-					cfg.start_address, cfg.function_address, num_hits, revision, last_compiled_cfg_size, is_compiled ? 'Y' : 'N');
+				return fmt::format("0x%08X: NumHits=%u, IsCompiled=%c",
+					address, num_hits, is_compiled ? 'Y' : 'N');
 			}
 
 			bool operator == (const BlockEntry & other) const {
-				return cfg.start_address == other.cfg.start_address;
+				return address == other.address;
 			}
-
-			bool IsFunction() const {
-				return cfg.function_address == cfg.start_address;
-			}
-
-			struct hash {
-				size_t operator()(const BlockEntry * e) const {
-					return e->cfg.start_address;
-				}
-			};
-
-			struct equal_to {
-				bool operator()(const BlockEntry * lhs, const BlockEntry * rhs) const {
-					return *lhs == *rhs;
-				}
-			};
 		};
 
 		/// Log
 		llvm::raw_fd_ostream * m_log;
 
-		/// Lock for accessing m_pending_execution_traces. TODO: Eliminate this and use a lock-free queue.
-		std::mutex m_pending_execution_traces_lock;
+		/// Lock for accessing m_pending_address_start. TODO: Eliminate this and use a lock-free queue.
+		std::mutex m_pending_address_start_lock;
 
-		/// Queue of execution traces pending processing
-		std::list<ExecutionTrace *> m_pending_execution_traces;
+		/// Queue of block start address to process
+		std::list<u32> m_pending_address_start;
 
 		/// Block table
-		std::unordered_set<BlockEntry *, BlockEntry::hash, BlockEntry::equal_to> m_block_table;
-
-		/// Execution traces that have been already encountered. Data is the list of all blocks that this trace includes.
-		std::unordered_map<ExecutionTrace::Id, std::vector<BlockEntry *>> m_processed_execution_traces;
-
-		/// Lock for accessing m_address_to_function.
-		std::mutex m_address_to_function_lock;
-		/// Lock for modifying address mutex table
-		std::mutex m_address_locks_lock;
+		std::unordered_map<u32, BlockEntry> m_block_table;
 
 		int m_currentId;
 
-		/// (function, module containing function, times hit, id).
-		typedef std::tuple<Executable, std::unique_ptr<llvm::ExecutionEngine>, u32, u32> ExecutableStorage;
-		/// Address to ordinal cahce. Key is address.
-		std::unordered_map<u32, ExecutableStorage> m_address_to_function;
-		std::unordered_map<u32, std::pair<std::mutex, std::atomic<int> > > m_address_locks;
+		/// (function, id).
+		typedef std::pair<Executable, u32> ExecutableStorageType;
+
+		/// Virtual memory allocated array.
+		/// Store pointer to every compiled function/block and a unique Id.
+		/// We need to map every instruction in PS3 Ram so it's a big table
+		/// But a lot of it won't be accessed. Fortunatly virtual memory help here...
+		ExecutableStorageType* FunctionCache;
+
+		// Bitfield recording page status in FunctionCache reserved memory.
+		char *FunctionCachePagesCommited;
+
+		bool isAddressCommited(u32) const;
+		void commitAddress(u32);
+
+		/// vector storing all exec engine
+		std::vector<std::unique_ptr<llvm::ExecutionEngine> > m_executable_storage;
+
+
+		/// LLVM context
+		llvm::LLVMContext &m_llvm_context;
+
+		/// LLVM IR builder
+		llvm::IRBuilder<> m_ir_builder;
+
+		/**
+		* Compile a code fragment described by a cfg and return an executable and the ExecutionEngine storing it
+		* Pointer to function can be retrieved with getPointerToFunction
+		*/
+		std::pair<Executable, llvm::ExecutionEngine *> compile(const std::string & name, u32 start_address, u32 instruction_count);
 
 		/// The time at which the m_address_to_ordinal cache was last cleared
 		std::chrono::high_resolution_clock::time_point m_last_cache_clear_time;
 
-		/// Remove unused entries from the m_address_to_ordinal cache
-		void RemoveUnusedEntriesFromCache();
-
-		/// PPU Compiler
-		Compiler m_compiler;
-
 		RecompilationEngine();
 
-		RecompilationEngine(const RecompilationEngine & other) = delete;
-		RecompilationEngine(RecompilationEngine && other) = delete;
+		RecompilationEngine(const RecompilationEngine&) = delete; // Delete copy/move constructors and copy/move operators
 
-		RecompilationEngine & operator = (const RecompilationEngine & other) = delete;
-		RecompilationEngine & operator = (RecompilationEngine && other) = delete;
+		/// Increase usage counter for block starting at addr and compile it if threshold was reached.
+		/// Returns true if block was compiled
+		bool IncreaseHitCounterAndBuild(u32 addr);
 
-		/// Process an execution trace.
-		void ProcessExecutionTrace(const ExecutionTrace & execution_trace);
-
-		/// Update a CFG
-		void UpdateControlFlowGraph(ControlFlowGraph & cfg, const ExecutionTraceEntry & this_entry, const ExecutionTraceEntry * next_entry);
+		/**
+		* Analyse block to get useful info (function called, has indirect branch...)
+		* This code is inspired from Dolphin PPC Analyst
+		* Return true if analysis is successful.
+		*/
+		bool AnalyseBlock(BlockEntry &functionData, size_t maxSize = 10000);
 
 		/// Compile a block
 		void CompileBlock(BlockEntry & block_entry);
@@ -1148,43 +880,6 @@ namespace ppu_recompiler_llvm {
 
 		/// The instance
 		static std::shared_ptr<RecompilationEngine> s_the_instance;
-	};
-
-	/// Finds interesting execution sequences
-	class Tracer {
-	public:
-		/// Trace type
-		enum class TraceType : u32 {
-			CallFunction,
-			EnterFunction,
-			ExitFromCompiledFunction,
-			Return,
-			Instruction,
-			ExitFromCompiledBlock,
-		};
-
-		Tracer();
-
-		Tracer(const Tracer & other) = delete;
-		Tracer(Tracer && other) = delete;
-
-		virtual ~Tracer();
-
-		Tracer & operator = (const Tracer & other) = delete;
-		Tracer & operator = (Tracer && other) = delete;
-
-		/// Notify the tracer
-		void Trace(TraceType trace_type, u32 arg1, u32 arg2);
-
-		/// Notify the tracer that the execution sequence is being terminated.
-		void Terminate();
-
-	private:
-		/// Call stack
-		std::vector<ExecutionTrace *> m_stack;
-
-		/// Recompilation engine
-		std::shared_ptr<RecompilationEngine> m_recompilation_engine;
 	};
 
 	/**
@@ -1198,15 +893,10 @@ namespace ppu_recompiler_llvm {
 		friend class Compiler;
 	public:
 		CPUHybridDecoderRecompiler(PPUThread & ppu);
-		CPUHybridDecoderRecompiler() = delete;
 
-		CPUHybridDecoderRecompiler(const CPUHybridDecoderRecompiler & other) = delete;
-		CPUHybridDecoderRecompiler(CPUHybridDecoderRecompiler && other) = delete;
+		CPUHybridDecoderRecompiler(const CPUHybridDecoderRecompiler&) = delete; // Delete copy/move constructors and copy/move operators
 
 		virtual ~CPUHybridDecoderRecompiler();
-
-		CPUHybridDecoderRecompiler & operator = (const ExecutionEngine & other) = delete;
-		CPUHybridDecoderRecompiler & operator = (ExecutionEngine && other) = delete;
 
 		u32 DecodeMemory(const u32 address) override;
 
@@ -1219,9 +909,6 @@ namespace ppu_recompiler_llvm {
 
 		/// PPU instruction Decoder
 		PPUDecoder m_decoder;
-
-		/// Execution tracer
-		Tracer m_tracer;
 
 		/// Recompilation engine
 		std::shared_ptr<RecompilationEngine> m_recompilation_engine;
@@ -1238,16 +925,16 @@ namespace ppu_recompiler_llvm {
 
 	class CustomSectionMemoryManager : public llvm::SectionMemoryManager {
 	private:
-		std::unordered_map<std::string, Executable> &executableMap;
+		std::unordered_map<std::string, void*> &executableMap;
 	public:
-		CustomSectionMemoryManager(std::unordered_map<std::string, Executable> &map) :
+		CustomSectionMemoryManager(std::unordered_map<std::string, void*> &map) :
 			executableMap(map)
 		{}
 		~CustomSectionMemoryManager() override {}
 
 		virtual uint64_t getSymbolAddress(const std::string &Name) override
 		{
-			std::unordered_map<std::string, Executable>::const_iterator It = executableMap.find(Name);
+			std::unordered_map<std::string, void*>::const_iterator It = executableMap.find(Name);
 			if (It != executableMap.end())
 				return (uint64_t)It->second;
 			return getSymbolAddressInProcess(Name);

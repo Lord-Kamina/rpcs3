@@ -6,20 +6,20 @@ namespace vm { using namespace ps3; }
 
 enum : s32
 {
-	SYS_SPU_THREAD_GROUP_TYPE_NORMAL = 0x00,
-	SYS_SPU_THREAD_GROUP_TYPE_SEQUENTIAL = 0x01,
-	SYS_SPU_THREAD_GROUP_TYPE_SYSTEM = 0x02,
+	SYS_SPU_THREAD_GROUP_TYPE_NORMAL                = 0x00,
+	SYS_SPU_THREAD_GROUP_TYPE_SEQUENTIAL            = 0x01,
+	SYS_SPU_THREAD_GROUP_TYPE_SYSTEM                = 0x02,
 	SYS_SPU_THREAD_GROUP_TYPE_MEMORY_FROM_CONTAINER = 0x04,
-	SYS_SPU_THREAD_GROUP_TYPE_NON_CONTEXT = 0x08,
+	SYS_SPU_THREAD_GROUP_TYPE_NON_CONTEXT           = 0x08,
 	SYS_SPU_THREAD_GROUP_TYPE_EXCLUSIVE_NON_CONTEXT = 0x18,
 	SYS_SPU_THREAD_GROUP_TYPE_COOPERATE_WITH_SYSTEM = 0x20,
 };
 
 enum
 {
-	SYS_SPU_THREAD_GROUP_JOIN_GROUP_EXIT = 0x0001,
+	SYS_SPU_THREAD_GROUP_JOIN_GROUP_EXIT       = 0x0001,
 	SYS_SPU_THREAD_GROUP_JOIN_ALL_THREADS_EXIT = 0x0002,
-	SYS_SPU_THREAD_GROUP_JOIN_TERMINATED = 0x0004
+	SYS_SPU_THREAD_GROUP_JOIN_TERMINATED       = 0x0004
 };
 
 enum
@@ -143,7 +143,7 @@ enum : u32
 
 class SPUThread;
 
-struct spu_group_t
+struct lv2_spu_group_t
 {
 	const std::string name;
 	const u32 num; // SPU Number
@@ -165,7 +165,7 @@ struct spu_group_t
 	std::weak_ptr<lv2_event_queue_t> ep_exception; // TODO: SYS_SPU_THREAD_GROUP_EVENT_EXCEPTION
 	std::weak_ptr<lv2_event_queue_t> ep_sysmodule; // TODO: SYS_SPU_THREAD_GROUP_EVENT_SYSTEM_MODULE
 
-	spu_group_t(std::string name, u32 num, s32 prio, s32 type, u32 ct)
+	lv2_spu_group_t(std::string name, u32 num, s32 prio, s32 type, u32 ct)
 		: name(name)
 		, num(num)
 		, prio(prio)

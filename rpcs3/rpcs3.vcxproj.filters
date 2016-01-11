@@ -81,9 +81,6 @@
     <ClCompile Include="Emu\Io\XInput\XInputPadHandler.cpp">
       <Filter>Io\XInput</Filter>
     </ClCompile>
-    <ClCompile Include="stdafx_gui.cpp">
-      <Filter>rpcs3</Filter>
-    </ClCompile>
     <ClCompile Include="Emu\Cell\PPUProgramCompiler.cpp">
       <Filter>Gui</Filter>
     </ClCompile>
@@ -102,7 +99,10 @@
     <ClCompile Include="Gui\SaveDataDialog.cpp">
       <Filter>Gui</Filter>
     </ClCompile>
-    <ClCompile Include="Gui\D3DGSFrame.cpp">
+    <ClCompile Include="Gui\SettingsDialog.cpp">
+      <Filter>Gui</Filter>
+    </ClCompile>
+    <ClCompile Include="Gui\SignInDialog.cpp">
       <Filter>Gui</Filter>
     </ClCompile>
   </ItemGroup>
@@ -210,7 +210,16 @@
       <Filter>Gui</Filter>
     </ClInclude>
     <ClInclude Include="resource.h" />
-    <ClInclude Include="Gui\D3DGSFrame.h">
+    <ClInclude Include="Gui\SettingsDialog.h">
+      <Filter>Gui</Filter>
+    </ClInclude>
+    <ClInclude Include="Gui\SignInDialog.h">
+      <Filter>Gui</Filter>
+    </ClInclude>
+    <ClInclude Include="Gui\MemoryStringSearcher.h">
+      <Filter>Gui</Filter>
+    </ClInclude>
+    <ClInclude Include="Gui\PADManager.h">
       <Filter>Gui</Filter>
     </ClInclude>
   </ItemGroup>

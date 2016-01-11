@@ -1,13 +1,13 @@
 #include "stdafx.h"
 #include "Emu/Memory/Memory.h"
 #include "Emu/System.h"
+#include "Emu/state.h"
 #include "Emu/SysCalls/Modules.h"
 
-#include "Ini.h"
 #include "Emu/RSX/GSManager.h"
 #include "cellVideoOut.h"
 
-extern Module cellSysutil;
+extern Module<> cellSysutil;
 
 s32 cellVideoOutGetState(u32 videoOut, u32 deviceIndex, vm::ptr<CellVideoOutState> state)
 {
@@ -25,11 +25,11 @@ s32 cellVideoOutGetState(u32 videoOut, u32 deviceIndex, vm::ptr<CellVideoOutStat
 		state->displayMode.conversion = Emu.GetGSManager().GetInfo().mode.conversion;
 		state->displayMode.aspect = Emu.GetGSManager().GetInfo().mode.aspect;
 		state->displayMode.refreshRates = Emu.GetGSManager().GetInfo().mode.refreshRates;
-		return CELL_VIDEO_OUT_SUCCEEDED;
+		return CELL_OK;
 
 	case CELL_VIDEO_OUT_SECONDARY:
 		*state = { CELL_VIDEO_OUT_OUTPUT_STATE_DISABLED }; // ???
-		return CELL_VIDEO_OUT_SUCCEEDED;
+		return CELL_OK;
 	}
 
 	return CELL_VIDEO_OUT_ERROR_UNSUPPORTED_VIDEO_OUT;
@@ -46,12 +46,12 @@ s32 cellVideoOutGetResolution(u32 resolutionId, vm::ptr<CellVideoOutResolution> 
 	resolution->width = ResolutionTable[num].width;
 	resolution->height = ResolutionTable[num].height;
 
-	return CELL_VIDEO_OUT_SUCCEEDED;
+	return CELL_OK;
 }
 
 s32 cellVideoOutConfigure(u32 videoOut, vm::ptr<CellVideoOutConfiguration> config, vm::ptr<CellVideoOutOption> option, u32 waitForEvent)
 {
-	cellSysutil.Warning("cellVideoOutConfigure(videoOut=%d, config=*0x%x, option=*0x%x, waitForEvent=0x%x)", videoOut, config, option, waitForEvent);
+	cellSysutil.Warning("cellVideoOutConfigure(videoOut=%d, config=*0x%x, option=*0x%x, waitForEvent=%d)", videoOut, config, option, waitForEvent);
 
 	switch (videoOut)
 	{
@@ -73,10 +73,10 @@ s32 cellVideoOutConfigure(u32 videoOut, vm::ptr<CellVideoOutConfiguration> confi
 			Emu.GetGSManager().GetInfo().mode.pitch = config->pitch;
 		}
 
-		return CELL_VIDEO_OUT_SUCCEEDED;
+		return CELL_OK;
 
 	case CELL_VIDEO_OUT_SECONDARY:
-		return CELL_VIDEO_OUT_SUCCEEDED;
+		return CELL_OK;
 	}
 
 	return CELL_VIDEO_OUT_ERROR_UNSUPPORTED_VIDEO_OUT;
@@ -97,11 +97,11 @@ s32 cellVideoOutGetConfiguration(u32 videoOut, vm::ptr<CellVideoOutConfiguration
 		config->aspect = Emu.GetGSManager().GetInfo().mode.aspect;
 		config->pitch = Emu.GetGSManager().GetInfo().mode.pitch;
 
-		return CELL_VIDEO_OUT_SUCCEEDED;
+		return CELL_OK;
 
 	case CELL_VIDEO_OUT_SECONDARY:
 
-		return CELL_VIDEO_OUT_SUCCEEDED;
+		return CELL_OK;
 	}
 
 	return CELL_VIDEO_OUT_ERROR_UNSUPPORTED_VIDEO_OUT;
@@ -155,7 +155,7 @@ s32 cellVideoOutGetResolutionAvailability(u32 videoOut, u32 resolutionId, u32 as
 {
 	cellSysutil.Warning("cellVideoOutGetResolutionAvailability(videoOut=%d, resolutionId=0x%x, aspect=%d, option=%d)", videoOut, resolutionId, aspect, option);
 
-	if (!Ini.GS3DTV.GetValue() && (resolutionId == CELL_VIDEO_OUT_RESOLUTION_720_3D_FRAME_PACKING || resolutionId == CELL_VIDEO_OUT_RESOLUTION_1024x720_3D_FRAME_PACKING ||
+	if (!rpcs3::config.rsx._3dtv.value() && (resolutionId == CELL_VIDEO_OUT_RESOLUTION_720_3D_FRAME_PACKING || resolutionId == CELL_VIDEO_OUT_RESOLUTION_1024x720_3D_FRAME_PACKING ||
 		resolutionId == CELL_VIDEO_OUT_RESOLUTION_960x720_3D_FRAME_PACKING || resolutionId == CELL_VIDEO_OUT_RESOLUTION_800x720_3D_FRAME_PACKING ||
 		resolutionId == CELL_VIDEO_OUT_RESOLUTION_640x720_3D_FRAME_PACKING))
 		return 0;

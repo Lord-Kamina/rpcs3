@@ -1,5 +1,4 @@
 #include "stdafx.h"
-#include "Utilities/Log.h"
 #include "vfsLocalFile.h"
 
 vfsLocalFile::vfsLocalFile(vfsDevice* device) : vfsFileBase(device)
@@ -33,32 +32,17 @@ u64 vfsLocalFile::Read(void* dst, u64 size)
 	return m_file.read(dst, size);
 }
 
-u64 vfsLocalFile::Seek(s64 offset, u32 mode)
+u64 vfsLocalFile::Seek(s64 offset, fsm mode)
 {
 	return m_file.seek(offset, mode);
 }
 
 u64 vfsLocalFile::Tell() const
 {
-	return m_file.seek(0, from_cur);
+	return m_file.seek(0, fsm::cur);
 }
 
 bool vfsLocalFile::IsOpened() const
 {
 	return m_file && vfsFileBase::IsOpened();
-}
-
-bool vfsLocalFile::Exists(const std::string& path)
-{
-	return fs::is_file(path);
-}
-
-bool vfsLocalFile::Rename(const std::string& from, const std::string& to)
-{
-	return fs::rename(from, to);
-}
-
-bool vfsLocalFile::Remove(const std::string& path)
-{
-	return fs::remove_file(path);
 }

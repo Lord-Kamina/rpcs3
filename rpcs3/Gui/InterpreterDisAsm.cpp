@@ -1,5 +1,5 @@
+#include "stdafx.h"
 #include "stdafx_gui.h"
-#include "Utilities/Log.h"
 #include "Emu/Memory/Memory.h"
 #include "Emu/System.h"
 #include "rpcs3.h"
@@ -7,7 +7,6 @@
 #include "Emu/CPU/CPUThreadManager.h"
 #include "Emu/Cell/PPUDecoder.h"
 #include "Emu/Cell/PPUDisAsm.h"
-#include "Emu/Cell/SPUDecoder.h"
 #include "Emu/Cell/SPUDisAsm.h"
 #include "Emu/ARMv7/ARMv7DisAsm.h"
 #include "Emu/ARMv7/ARMv7Decoder.h"
@@ -27,7 +26,6 @@ InterpreterDisAsmFrame::InterpreterDisAsmFrame(wxWindow* parent)
 	, PC(0)
 	, CPU(nullptr)
 	, m_item_count(30)
-	, decoder(nullptr)
 	, disasm(nullptr)
 {
 	wxBoxSizer* s_p_main = new wxBoxSizer(wxVERTICAL);
@@ -121,10 +119,26 @@ void InterpreterDisAsmFrame::OnSelectUnit(wxCommandEvent& event)
 {
 	CPU = (CPUThread*)event.GetClientData();
 
-	delete decoder;
-	//delete disasm;
-	decoder = nullptr;
+	decoder.reset();
 	disasm = nullptr;
+
+	class SPUDecoder : public CPUDecoder
+	{
+		std::unique_ptr<SPUDisAsm> disasm;
+
+	public:
+		SPUDecoder(SPUDisAsm* disasm)
+			: disasm(disasm)
+		{
+		}
+
+		virtual u32 DecodeMemory(const u32 address) override
+		{
+			disasm->do_disasm(vm::ps3::read32(address));
+
+			return 4;
+		}
+	};
 
 	if(CPU)
 	{
@@ -133,7 +147,7 @@ void InterpreterDisAsmFrame::OnSelectUnit(wxCommandEvent& event)
 		case CPU_THREAD_PPU:
 		{
 			PPUDisAsm* dis_asm = new PPUDisAsm(CPUDisAsm_InterpreterMode);
-			decoder = new PPUDecoder(dis_asm);
+			decoder = std::make_unique<PPUDecoder>(dis_asm);
 			disasm = dis_asm;
 		}
 		break;
@@ -141,9 +155,9 @@ void InterpreterDisAsmFrame::OnSelectUnit(wxCommandEvent& event)
 		case CPU_THREAD_SPU:
 		case CPU_THREAD_RAW_SPU:
 		{
-			SPUDisAsm& dis_asm = *new SPUDisAsm(CPUDisAsm_InterpreterMode);
-			decoder = new SPUDecoder(dis_asm);
-			disasm = &dis_asm;
+			SPUDisAsm* dis_asm = new SPUDisAsm(CPUDisAsm_InterpreterMode);
+			decoder = std::make_unique<SPUDecoder>(dis_asm);
+			disasm = dis_asm;
 		}
 		break;
 
@@ -247,7 +261,7 @@ void InterpreterDisAsmFrame::ShowAddr(const u64 addr)
 	}
 	else
 	{
-		disasm->offset = vm::get_ptr<u8>(CPU->get_offset());
+		disasm->offset = (u8*)vm::base(CPU->get_offset());
 		for(uint i=0, count = 4; i<m_item_count; ++i, PC += count)
 		{
 			if(!vm::check_addr(CPU->get_offset() + PC, 4))
@@ -511,12 +525,12 @@ void InterpreterDisAsmFrame::InstrKey(wxListEvent& event)
 	{
 	case 'E':
 		// TODO:: Syphurith: It is said the InstructionEditorDialog would be immediately destroyed.
-		InstructionEditorDialog(this, pc, CPU, decoder, disasm);
+		InstructionEditorDialog(this, pc, CPU, decoder.get(), disasm);
 		DoUpdate();
 		return;
 	case 'R':
 		// TODO:: Syphurith: Eh Similiar for this one.
-		RegisterEditorDialog(this, pc, CPU, decoder, disasm);
+		RegisterEditorDialog(this, pc, CPU, decoder.get(), disasm);
 		DoUpdate();
 		return;
 	}

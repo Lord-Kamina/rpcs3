@@ -1,5 +1,4 @@
 #include "stdafx.h"
-#include "Utilities/Log.h"
 #include "Emu/System.h"
 #include "Emu/FS/VFS.h"
 #include "Emu/FS/vfsFile.h"
@@ -36,7 +35,7 @@ bool TRPLoader::Install(std::string dest, bool show)
 		char* buffer = new char [(u32)entry.size];
 		trp_f.Seek(entry.offset);
 		trp_f.Read(buffer, entry.size);
-		vfsFile(dest + entry.name, vfsWriteNew).Write(buffer, entry.size);
+		vfsFile(dest + entry.name, fom::rewrite).Write(buffer, entry.size);
 		delete[] buffer;
 	}
 

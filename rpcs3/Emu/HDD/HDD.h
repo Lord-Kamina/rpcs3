@@ -156,9 +156,9 @@ public:
 
 	bool SearchEntry(const std::string& name, u64& entry_block, u64* parent_block = nullptr);
 
-	int OpenDir(const std::string& name);
+	s32 OpenDir(const std::string& name);
 
-	bool Rename(const std::string& from, const std::string& to) override;
+	bool Rename(const std::string& from, const std::string& to);
 
 	u64 FindFreeBlock();
 
@@ -182,7 +182,7 @@ public:
 
 	bool GetNextEntry(u64& block, vfsHDD_Entry& entry, std::string& name);
 
-	virtual bool Open(const std::string& path, u32 mode = vfsRead) override;
+	virtual bool Open(const std::string& path, u32 mode = fom::read) override;
 
 	bool HasEntry(const std::string& name);
 
@@ -196,7 +196,7 @@ public:
 
 	virtual u64 Read(void* dst, u64 count) override;
 
-	virtual u64 Seek(s64 offset, u32 mode = from_begin) override;
+	virtual u64 Seek(s64 offset, fsm seek_mode = fsm::begin) override;
 
 	virtual u64 Tell() const override;
 

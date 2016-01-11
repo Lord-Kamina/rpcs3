@@ -462,7 +462,7 @@ public:
 	PPCdouble FPR[32]{}; //Floating Point Register
 	FPSCRhdr FPSCR{}; //Floating Point Status and Control Register
 	u64 GPR[32]{}; //General-Purpose Register
-	u128 VPR[32]{};
+	v128 VPR[32]{};
 	u32 vpcr = 0;
 
 	CRhdr CR{}; //Condition Register
@@ -536,21 +536,27 @@ public:
 
 	std::function<void(PPUThread& CPU)> custom_task;
 
+	// When a thread has met an exception, this variable is used to retro propagate it through stack call.
+	std::exception_ptr pending_exception;
+
 public:
 	PPUThread(const std::string& name);
 	virtual ~PPUThread() override;
 
+	virtual std::string get_name() const override;
 	virtual void dump_info() const override;
 	virtual u32 get_pc() const override { return PC; }
 	virtual u32 get_offset() const override { return 0; }
 	virtual void do_run() override;
-	virtual void task() override;
+	virtual void cpu_task() override;
 
 	virtual void init_regs() override;
 	virtual void init_stack() override;
 	virtual void close_stack() override;
 
-	inline u8 GetCR(const u8 n) const
+	virtual bool handle_interrupt() override;
+
+	u8 GetCR(const u8 n) const
 	{
 		switch(n)
 		{
@@ -567,7 +573,7 @@ public:
 		return 0;
 	}
 
-	inline void SetCR(const u8 n, const u32 value)
+	void SetCR(const u8 n, const u32 value)
 	{
 		switch(n)
 		{
@@ -582,7 +588,7 @@ public:
 		}
 	}
 
-	inline void SetCRBit(const u8 n, const u32 bit, const bool value)
+	void SetCRBit(const u8 n, const u32 bit, const bool value)
 	{
 		switch(n)
 		{
@@ -597,14 +603,14 @@ public:
 		}
 	}
 
-	inline void SetCR_EQ(const u8 n, const bool value) { SetCRBit(n, CR_EQ, value); }
-	inline void SetCR_GT(const u8 n, const bool value) { SetCRBit(n, CR_GT, value); }
-	inline void SetCR_LT(const u8 n, const bool value) { SetCRBit(n, CR_LT, value); }	
-	inline void SetCR_SO(const u8 n, const bool value) { SetCRBit(n, CR_SO, value); }
+	void SetCR_EQ(const u8 n, const bool value) { SetCRBit(n, CR_EQ, value); }
+	void SetCR_GT(const u8 n, const bool value) { SetCRBit(n, CR_GT, value); }
+	void SetCR_LT(const u8 n, const bool value) { SetCRBit(n, CR_LT, value); }	
+	void SetCR_SO(const u8 n, const bool value) { SetCRBit(n, CR_SO, value); }
 
-	inline bool IsCR_EQ(const u8 n) const { return (GetCR(n) & CR_EQ) ? 1 : 0; }
-	inline bool IsCR_GT(const u8 n) const { return (GetCR(n) & CR_GT) ? 1 : 0; }
-	inline bool IsCR_LT(const u8 n) const { return (GetCR(n) & CR_LT) ? 1 : 0; }
+	bool IsCR_EQ(const u8 n) const { return (GetCR(n) & CR_EQ) ? 1 : 0; }
+	bool IsCR_GT(const u8 n) const { return (GetCR(n) & CR_GT) ? 1 : 0; }
+	bool IsCR_LT(const u8 n) const { return (GetCR(n) & CR_LT) ? 1 : 0; }
 
 	template<typename T> void UpdateCRn(const u8 n, const T a, const T b)
 	{
@@ -705,26 +711,26 @@ public:
 	{
 		std::string ret = "Registers:\n=========\n";
 
-		for(uint i=0; i<32; ++i) ret += fmt::Format("GPR[%d] = 0x%llx\n", i, GPR[i]);
-		for(uint i=0; i<32; ++i) ret += fmt::Format("FPR[%d] = %.6G\n", i, (double)FPR[i]);
-		for(uint i=0; i<32; ++i) ret += fmt::Format("VPR[%d] = 0x%s [%s]\n", i, VPR[i].to_hex().c_str(), VPR[i].to_xyzw().c_str());
-		ret += fmt::Format("CR = 0x%08x\n", CR.CR);
-		ret += fmt::Format("LR = 0x%llx\n", LR);
-		ret += fmt::Format("CTR = 0x%llx\n", CTR);
-		ret += fmt::Format("XER = 0x%llx [CA=%lld | OV=%lld | SO=%lld]\n", XER.XER, fmt::by_value(XER.CA), fmt::by_value(XER.OV), fmt::by_value(XER.SO));
-		ret += fmt::Format("FPSCR = 0x%x "
+		for(uint i=0; i<32; ++i) ret += fmt::format("GPR[%d] = 0x%llx\n", i, GPR[i]);
+		for(uint i=0; i<32; ++i) ret += fmt::format("FPR[%d] = %.6G\n", i, (double)FPR[i]);
+		for(uint i=0; i<32; ++i) ret += fmt::format("VPR[%d] = 0x%s [%s]\n", i, VPR[i].to_hex().c_str(), VPR[i].to_xyzw().c_str());
+		ret += fmt::format("CR = 0x%08x\n", CR.CR);
+		ret += fmt::format("LR = 0x%llx\n", LR);
+		ret += fmt::format("CTR = 0x%llx\n", CTR);
+		ret += fmt::format("XER = 0x%llx [CA=%lld | OV=%lld | SO=%lld]\n", XER.XER, u32{ XER.CA }, u32{ XER.OV }, u32{ XER.SO });
+		ret += fmt::format("FPSCR = 0x%x "
 			"[RN=%d | NI=%d | XE=%d | ZE=%d | UE=%d | OE=%d | VE=%d | "
 			"VXCVI=%d | VXSQRT=%d | VXSOFT=%d | FPRF=%d | "
 			"FI=%d | FR=%d | VXVC=%d | VXIMZ=%d | "
 			"VXZDZ=%d | VXIDI=%d | VXISI=%d | VXSNAN=%d | "
 			"XX=%d | ZX=%d | UX=%d | OX=%d | VX=%d | FEX=%d | FX=%d]\n",
 			FPSCR.FPSCR,
-			fmt::by_value(FPSCR.RN),
-			fmt::by_value(FPSCR.NI), fmt::by_value(FPSCR.XE), fmt::by_value(FPSCR.ZE), fmt::by_value(FPSCR.UE), fmt::by_value(FPSCR.OE), fmt::by_value(FPSCR.VE),
-			fmt::by_value(FPSCR.VXCVI), fmt::by_value(FPSCR.VXSQRT), fmt::by_value(FPSCR.VXSOFT), fmt::by_value(FPSCR.FPRF),
-			fmt::by_value(FPSCR.FI), fmt::by_value(FPSCR.FR), fmt::by_value(FPSCR.VXVC), fmt::by_value(FPSCR.VXIMZ),
-			fmt::by_value(FPSCR.VXZDZ), fmt::by_value(FPSCR.VXIDI), fmt::by_value(FPSCR.VXISI), fmt::by_value(FPSCR.VXSNAN),
-			fmt::by_value(FPSCR.XX), fmt::by_value(FPSCR.ZX), fmt::by_value(FPSCR.UX), fmt::by_value(FPSCR.OX), fmt::by_value(FPSCR.VX), fmt::by_value(FPSCR.FEX), fmt::by_value(FPSCR.FX));
+			u32{ FPSCR.RN },
+			u32{ FPSCR.NI }, u32{ FPSCR.XE }, u32{ FPSCR.ZE }, u32{ FPSCR.UE }, u32{ FPSCR.OE }, u32{ FPSCR.VE },
+			u32{ FPSCR.VXCVI }, u32{ FPSCR.VXSQRT }, u32{ FPSCR.VXSOFT }, u32{ FPSCR.FPRF },
+			u32{ FPSCR.FI }, u32{ FPSCR.FR }, u32{ FPSCR.VXVC }, u32{ FPSCR.VXIMZ },
+			u32{ FPSCR.VXZDZ }, u32{ FPSCR.VXIDI }, u32{ FPSCR.VXISI }, u32{ FPSCR.VXSNAN },
+			u32{ FPSCR.XX }, u32{ FPSCR.ZX }, u32{ FPSCR.UX }, u32{ FPSCR.OX }, u32{ FPSCR.VX }, u32{ FPSCR.FEX }, u32{ FPSCR.FX });
 
 		return ret;
 	}
@@ -735,15 +741,15 @@ public:
 		if (first_brk != std::string::npos)
 		{
 			long reg_index = atol(reg.substr(first_brk+1,reg.length()-first_brk-2).c_str());
-			if (reg.find("GPR")==0) return fmt::Format("%016llx", GPR[reg_index]);
-			if (reg.find("FPR")==0) return fmt::Format("%016llx", (double)FPR[reg_index]);
-			if (reg.find("VPR")==0) return fmt::Format("%016llx%016llx", VPR[reg_index]._u64[1], VPR[reg_index]._u64[0]);
+			if (reg.find("GPR")==0) return fmt::format("%016llx", GPR[reg_index]);
+			if (reg.find("FPR")==0) return fmt::format("%016llx", (double)FPR[reg_index]);
+			if (reg.find("VPR")==0) return fmt::format("%016llx%016llx", VPR[reg_index]._u64[1], VPR[reg_index]._u64[0]);
 		}
-		if (reg == "CR")    return fmt::Format("%08x", CR.CR);
-		if (reg == "LR")    return fmt::Format("%016llx", LR);
-		if (reg == "CTR")   return fmt::Format("%016llx", CTR);
-		if (reg == "XER")   return fmt::Format("%016llx", XER.XER);
-		if (reg == "FPSCR") return fmt::Format("%08x", FPSCR.FPSCR);
+		if (reg == "CR")    return fmt::format("%08x", CR.CR);
+		if (reg == "LR")    return fmt::format("%016llx", LR);
+		if (reg == "CTR")   return fmt::format("%016llx", CTR);
+		if (reg == "XER")   return fmt::format("%016llx", XER.XER);
+		if (reg == "FPSCR") return fmt::format("%08x", FPSCR.FPSCR);
 
 		return "";
 	}
@@ -1005,3 +1011,20 @@ force_inline T cast_from_ppu_gpr(const u64 reg)
 {
 	return cast_ppu_gpr<T>::from_gpr(reg);
 }
+
+// flags set in ModuleFunc
+enum : u32
+{
+	MFF_FORCED_HLE = (1 << 0), // always call HLE function
+	MFF_NO_RETURN  = (1 << 1), // uses EIF_USE_BRANCH flag with LLE, ignored with MFF_FORCED_HLE
+};
+
+// flags passed with index
+enum : u32
+{
+	EIF_SAVE_RTOC   = (1 << 25), // save RTOC in [SP+0x28] before calling HLE/LLE function
+	EIF_PERFORM_BLR = (1 << 24), // do BLR after calling HLE/LLE function
+	EIF_USE_BRANCH  = (1 << 23), // do only branch, LLE must be set, last_syscall must be zero
+
+	EIF_FLAGS = 0x3800000, // all flags
+};

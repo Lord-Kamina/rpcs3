@@ -7,7 +7,7 @@
 #include "Emu/SysCalls/lv2/sys_process.h"
 #include "sysPrxForUser.h"
 
-extern Module sysPrxForUser;
+extern Module<> sysPrxForUser;
 
 extern u64 get_system_time();
 
@@ -30,7 +30,7 @@ u32 ppu_get_tls(u32 thread)
 	{
 		g_tls_size = Emu.GetTLSMemsz() + TLS_SYS;
 		g_tls_start = vm::alloc(g_tls_size * TLS_MAX, vm::main); // memory for up to TLS_MAX threads
-		sysPrxForUser.Notice("Thread Local Storage initialized (g_tls_start=0x%x, user_size=0x%x)\n*** TLS segment addr: 0x%08x\n*** TLS segment size: 0x%08x",
+		LOG_NOTICE(MEMORY, "Thread Local Storage initialized (g_tls_start=0x%x, user_size=0x%x)\n*** TLS segment addr: 0x%08x\n*** TLS segment size: 0x%08x",
 			g_tls_start, Emu.GetTLSMemsz(), Emu.GetTLSAddr(), Emu.GetTLSFilesz());
 	}
 
@@ -53,9 +53,9 @@ u32 ppu_get_tls(u32 thread)
 		if (g_tls_owners[i].compare_exchange_strong(old, thread))
 		{
 			const u32 addr = g_tls_start + i * g_tls_size + TLS_SYS; // get TLS address
-			memset(vm::get_ptr(addr - TLS_SYS), 0, TLS_SYS); // initialize system area with zeros
-			memcpy(vm::get_ptr(addr), vm::get_ptr(Emu.GetTLSAddr()), Emu.GetTLSFilesz()); // initialize from TLS image
-			memset(vm::get_ptr(addr + Emu.GetTLSFilesz()), 0, Emu.GetTLSMemsz() - Emu.GetTLSFilesz()); // fill the rest with zeros
+			std::memset(vm::base(addr - TLS_SYS), 0, TLS_SYS); // initialize system area with zeros
+			std::memcpy(vm::base(addr), vm::base(Emu.GetTLSAddr()), Emu.GetTLSFilesz()); // initialize from TLS image
+			std::memset(vm::base(addr + Emu.GetTLSFilesz()), 0, Emu.GetTLSMemsz() - Emu.GetTLSFilesz()); // fill the rest with zeros
 			return addr;
 		}
 	}
@@ -73,6 +73,8 @@ void ppu_free_tls(u32 thread)
 			return;
 		}
 	}
+
+	LOG_ERROR(MEMORY, "TLS deallocation failed (thread=0x%x)", thread);
 }
 
 s64 sys_time_get_system_time()
@@ -98,7 +100,7 @@ s32 sys_interrupt_thread_disestablish(PPUThread& ppu, u32 ih)
 {
 	sysPrxForUser.Todo("sys_interrupt_thread_disestablish(ih=0x%x)", ih);
 
-	return _sys_interrupt_thread_disestablish(ppu, ih, vm::stackvar<be_t<u64>>(ppu));
+	return _sys_interrupt_thread_disestablish(ppu, ih, vm::var<u64>{});
 }
 
 s32 sys_process_is_stack(u32 p)
@@ -142,9 +144,13 @@ s32 console_putc()
 	throw EXCEPTION("");
 }
 
-s32 console_write()
+s32 console_write(vm::ptr<char> data, u32 len)
 {
-	throw EXCEPTION("");
+	sysPrxForUser.Warning("console_write(data=*0x%x, len=%d)", data, len);
+
+	LOG_NOTICE(TTY, { data.get_ptr(), len });
+
+	return CELL_OK;
 }
 
 
@@ -160,12 +166,13 @@ extern void sysPrxForUser_sys_spu_init();
 extern void sysPrxForUser_sys_game_init();
 extern void sysPrxForUser_sys_libc_init();
 
-Module sysPrxForUser("sysPrxForUser", []()
+Module<> sysPrxForUser("sysPrxForUser", []()
 {
 	g_tls_start = 0;
+
 	for (auto& v : g_tls_owners)
 	{
-		v.store(0, std::memory_order_relaxed);
+		v = 0;
 	}
 
 	// Setup random number generator

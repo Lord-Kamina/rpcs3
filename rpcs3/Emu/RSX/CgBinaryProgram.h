@@ -1,7 +1,5 @@
 #pragma once
 #include <sstream>
-#include "Utilities/File.h"
-#include "Utilities/Log.h"
 #include "Emu/Memory/Memory.h"
 #include "Emu/RSX/GL/GLVertexProgram.h"
 #include "Emu/RSX/GL/GLFragmentProgram.h"
@@ -110,7 +108,17 @@ struct CgBinaryProgram
 
 class CgBinaryDisasm
 {
-private:
+	OPDEST dst;
+	SRC0 src0;
+	SRC1 src1;
+	SRC2 src2;
+
+	D0 d0;
+	D1 d1;
+	D2 d2;
+	D3 d3;
+	SRC src[3];
+
 	std::string m_path; // used for FP decompiler thread, delete this later
 
 	u8* m_buffer;
@@ -318,14 +326,15 @@ public:
 					size_t size = f.size();
 					vm::ps3::init();
 					ptr = vm::alloc(size, vm::main);
-					f.read(vm::get_ptr(ptr), size);
+					f.read(vm::base(ptr), size);
 				}
 				
-				auto& vmprog = vm::get_ref<CgBinaryProgram>(ptr);
-				auto& vmfprog = vm::get_ref<CgBinaryFragmentProgram>(ptr + vmprog.program);
+				auto& vmprog = vm::ps3::_ref<CgBinaryProgram>(ptr);
+				auto& vmfprog = vm::ps3::_ref<CgBinaryFragmentProgram>(ptr + vmprog.program);
 				u32 size;
 				u32 ctrl = (vmfprog.outputFromH0 ? 0 : 0x40) | (vmfprog.depthReplace ? 0xe : 0);
-				GLFragmentDecompilerThread(m_glsl_shader, param_array, ptr + vmprog.ucode, size, ctrl).Task();
+				std::vector<texture_dimension> td;
+				GLFragmentDecompilerThread(m_glsl_shader, param_array, ptr + vmprog.ucode, size, ctrl, td).Task();
 				vm::close();
 			}
 		}
@@ -365,7 +374,7 @@ public:
 			assert((m_buffer_size - m_offset) % sizeof(u32) == 0);
 			for (u32 i = 0; i < (m_buffer_size - m_offset) / sizeof(u32); i++)
 			{
-				vdata[i] = _byteswap_ulong(vdata[i]); // WTF, cannot use be_t<> there?
+				vdata[i] = se_storage<u32>::swap(vdata[i]); // WTF, cannot use be_t<> there?
 			}
 
 			for (u32 i = 0; i < prog.ucodeSize / sizeof(u32); i++)

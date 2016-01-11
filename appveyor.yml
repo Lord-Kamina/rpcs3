@@ -5,7 +5,7 @@ configuration:
  - ReleaseLLVM
 platform: x64
 clone_folder: c:\rpcs3
-clone_depth: 1
+clone_depth: 3
 test: off
 
 branches:
@@ -13,9 +13,8 @@ branches:
    - ppu_recompiler
 
 before_build:
- - git submodule update --init --depth 3 asmjit minidx9
  # until git for win 2.5 release with commit checkout
- - git submodule update --init ffmpeg
+ - git submodule update --init ffmpeg asmjit minidx9 rsx_program_decompiler GSL
  - 7z x wxWidgets.7z -aos -oC:\rpcs3\wxWidgets > null
  - if %configuration%==Release (cmake -G "Visual Studio 14 Win64")
    else (7z x llvmlibs.7z -aos -oC:\rpcs3 > null && cmake -G "Visual Studio 14 Win64" -DLLVM_DIR=C:/rpcs3/llvm_build/share/llvm/cmake)

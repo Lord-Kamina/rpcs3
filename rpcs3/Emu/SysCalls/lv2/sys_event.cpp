@@ -7,6 +7,7 @@
 #include "Emu/Cell/PPUThread.h"
 #include "Emu/Cell/SPUThread.h"
 #include "Emu/Event.h"
+#include "sys_sync.h"
 #include "sys_process.h"
 #include "sys_event.h"
 
@@ -15,7 +16,7 @@ SysCallBase sys_event("sys_event");
 extern u64 get_system_time();
 
 lv2_event_queue_t::lv2_event_queue_t(u32 protocol, s32 type, u64 name, u64 key, s32 size)
-	: id(Emu.GetIdManager().get_current_id())
+	: id(idm::get_last_id())
 	, protocol(protocol)
 	, type(type)
 	, name(name)
@@ -97,7 +98,7 @@ s32 sys_event_queue_create(vm::ptr<u32> equeue_id, vm::ptr<sys_event_queue_attri
 		return CELL_EINVAL;
 	}
 
-	const auto queue = Emu.GetEventManager().MakeEventQueue(event_queue_key, protocol, type, attr->name_u64, event_queue_key, size);
+	const auto queue = Emu.GetEventManager().MakeEventQueue(event_queue_key, protocol, type, reinterpret_cast<u64&>(attr->name), event_queue_key, size);
 
 	if (!queue)
 	{
@@ -115,7 +116,7 @@ s32 sys_event_queue_destroy(u32 equeue_id, s32 mode)
 
 	LV2_LOCK;
 
-	const auto queue = Emu.GetIdManager().get<lv2_event_queue_t>(equeue_id);
+	const auto queue = idm::get<lv2_event_queue_t>(equeue_id);
 
 	if (!queue)
 	{
@@ -134,7 +135,7 @@ s32 sys_event_queue_destroy(u32 equeue_id, s32 mode)
 
 	// cleanup
 	Emu.GetEventManager().UnregisterKey(queue->key);
-	Emu.GetIdManager().remove<lv2_event_queue_t>(equeue_id);
+	idm::remove<lv2_event_queue_t>(equeue_id);
 
 	// signal all threads to return CELL_ECANCELED
 	for (auto& thread : queue->sq)
@@ -164,7 +165,7 @@ s32 sys_event_queue_tryreceive(u32 equeue_id, vm::ptr<sys_event_t> event_array, 
 
 	LV2_LOCK;
 
-	const auto queue = Emu.GetIdManager().get<lv2_event_queue_t>(equeue_id);
+	const auto queue = idm::get<lv2_event_queue_t>(equeue_id);
 
 	if (!queue)
 	{
@@ -205,7 +206,7 @@ s32 sys_event_queue_receive(PPUThread& ppu, u32 equeue_id, vm::ptr<sys_event_t> 
 
 	LV2_LOCK;
 
-	const auto queue = Emu.GetIdManager().get<lv2_event_queue_t>(equeue_id);
+	const auto queue = idm::get<lv2_event_queue_t>(equeue_id);
 
 	if (!queue)
 	{
@@ -256,7 +257,7 @@ s32 sys_event_queue_receive(PPUThread& ppu, u32 equeue_id, vm::ptr<sys_event_t> 
 
 	if (ppu.GPR[3])
 	{
-		if (Emu.GetIdManager().check_id<lv2_event_queue_t>(equeue_id))
+		if (idm::check<lv2_event_queue_t>(equeue_id))
 		{
 			throw EXCEPTION("Unexpected");
 		}
@@ -274,7 +275,7 @@ s32 sys_event_queue_drain(u32 equeue_id)
 
 	LV2_LOCK;
 
-	const auto queue = Emu.GetIdManager().get<lv2_event_queue_t>(equeue_id);
+	const auto queue = idm::get<lv2_event_queue_t>(equeue_id);
 
 	if (!queue)
 	{
@@ -296,7 +297,7 @@ s32 sys_event_port_create(vm::ptr<u32> eport_id, s32 port_type, u64 name)
 		return CELL_EINVAL;
 	}
 
-	*eport_id = Emu.GetIdManager().make<lv2_event_port_t>(port_type, name);
+	*eport_id = idm::make<lv2_event_port_t>(port_type, name);
 
 	return CELL_OK;
 }
@@ -307,7 +308,7 @@ s32 sys_event_port_destroy(u32 eport_id)
 
 	LV2_LOCK;
 
-	const auto port = Emu.GetIdManager().get<lv2_event_port_t>(eport_id);
+	const auto port = idm::get<lv2_event_port_t>(eport_id);
 
 	if (!port)
 	{
@@ -319,7 +320,7 @@ s32 sys_event_port_destroy(u32 eport_id)
 		return CELL_EISCONN;
 	}
 
-	Emu.GetIdManager().remove<lv2_event_port_t>(eport_id);
+	idm::remove<lv2_event_port_t>(eport_id);
 
 	return CELL_OK;
 }
@@ -330,8 +331,8 @@ s32 sys_event_port_connect_local(u32 eport_id, u32 equeue_id)
 
 	LV2_LOCK;
 
-	const auto port = Emu.GetIdManager().get<lv2_event_port_t>(eport_id);
-	const auto queue = Emu.GetIdManager().get<lv2_event_queue_t>(equeue_id);
+	const auto port = idm::get<lv2_event_port_t>(eport_id);
+	const auto queue = idm::get<lv2_event_queue_t>(equeue_id);
 
 	if (!port || !queue)
 	{
@@ -359,7 +360,7 @@ s32 sys_event_port_disconnect(u32 eport_id)
 
 	LV2_LOCK;
 
-	const auto port = Emu.GetIdManager().get<lv2_event_port_t>(eport_id);
+	const auto port = idm::get<lv2_event_port_t>(eport_id);
 
 	if (!port)
 	{
@@ -386,7 +387,7 @@ s32 sys_event_port_send(u32 eport_id, u64 data1, u64 data2, u64 data3)
 
 	LV2_LOCK;
 
-	const auto port = Emu.GetIdManager().get<lv2_event_port_t>(eport_id);
+	const auto port = idm::get<lv2_event_port_t>(eport_id);
 
 	if (!port)
 	{

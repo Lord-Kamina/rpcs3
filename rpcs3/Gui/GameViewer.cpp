@@ -1,7 +1,6 @@
+#include "stdafx.h"
 #include "stdafx_gui.h"
 #include "Utilities/AutoPause.h"
-#include "Utilities/Log.h"
-//#include "Utilities/File.h"
 #include "Emu/Memory/Memory.h"
 #include "Emu/System.h"
 #include "Emu/FS/VFS.h"
@@ -9,6 +8,7 @@
 #include "Emu/FS/vfsFile.h"
 #include "GameViewer.h"
 #include "Loader/PSF.h"
+#include "SettingsDialog.h"
 #include <wx/dir.h>
 
 static const std::string m_class_name = "GameViewer";
@@ -37,30 +37,6 @@ public:
 	}
 };
 
-class WxDirDeleteTraverser : public wxDirTraverser
-{
-public:
-	virtual wxDirTraverseResult OnFile(const wxString& filename) override
-	{
-		if (!wxRemoveFile(filename)){
-			LOG_ERROR(HLE, "Couldn't delete File: %s", fmt::ToUTF8(filename).c_str());
-		}
-		return wxDIR_CONTINUE;
-	}
-	virtual wxDirTraverseResult OnDir(const wxString& dirname) override
-	{
-		wxDir dir(dirname);
-		dir.Traverse(*this);
-		if (!wxRmDir(dirname)){
-			//this get triggered a few times while clearing folders
-			//but if this gets reimplented we should probably warn
-			//if directories can't be removed
-		}
-		return wxDIR_CONTINUE;
-	}
-};
-
-
 // GameViewer functions
 GameViewer::GameViewer(wxWindow* parent) : wxListView(parent)
 {
@@ -71,7 +47,6 @@ GameViewer::GameViewer(wxWindow* parent) : wxListView(parent)
 	m_sortAscending = true;
 	m_path = "/dev_hdd0/game/";
 	m_popup = new wxMenu();
-	m_popup->Append(0, _T("Remove Game"));
 
 	Bind(wxEVT_LIST_ITEM_ACTIVATED, &GameViewer::DClick, this);
 	Bind(wxEVT_LIST_COL_CLICK, &GameViewer::OnColClick, this);
@@ -120,7 +95,7 @@ void GameViewer::LoadGames()
 void GameViewer::LoadPSF()
 {
 	m_game_data.clear();
-	for(uint i=0; i<m_games.size(); ++i)
+	for (u32 i = 0; i < m_games.size(); ++i)
 	{
 		const std::string sfb = m_path + m_games[i] + "/PS3_DISC.SFB"; 
 		const std::string sfo = m_path + m_games[i] + (Emu.GetVFS().ExistsFile(sfb) ? "/PS3_GAME/PARAM.SFO" : "/PARAM.SFO");
@@ -174,6 +149,21 @@ void GameViewer::LoadPSF()
 			game.category = "Disc Game";
 			game.icon_path = local_path + "/" + m_games[i] + "/PS3_GAME/ICON0.PNG";
 		}
+		else if (game.category.substr(0, 2) == "HM")
+		{
+			game.category = "Home";
+			game.icon_path = local_path + "/" + m_games[i] + "/ICON0.PNG";
+		}
+		else if (game.category.substr(0, 2) == "AV")
+		{
+			game.category = "Audio/Video";
+			game.icon_path = local_path + "/" + m_games[i] + "/ICON0.PNG";
+		}
+		else if (game.category.substr(0, 2) == "GD")
+		{
+			game.category = "Game Data";
+			game.icon_path = local_path + "/" + m_games[i] + "/ICON0.PNG";
+		}
 			
 		m_game_data.push_back(game);
 	}
@@ -210,7 +200,7 @@ void GameViewer::LoadSettings()
 void GameViewer::DClick(wxListEvent& event)
 {
 	long i = GetFirstSelected();
-	if(i < 0) return;
+	if (i < 0) return;
 
 	const std::string& path = m_path + m_game_data[i].root;
 
@@ -220,41 +210,68 @@ void GameViewer::DClick(wxListEvent& event)
 
 	Emu.GetVFS().Init("/");
 	std::string local_path;
-	if (Emu.GetVFS().GetDevice(path, local_path) && !Emu.BootGame(local_path)) {
+	if (Emu.GetVFS().GetDevice(path, local_path) && !Emu.BootGame(local_path))
+	{
 		LOG_ERROR(HLE, "Boot error: elf not found! [%s]", path.c_str());
 		return;
 	}
 
-	if (Ini.HLEAlwaysStart.GetValue() && Emu.IsReady()) {
+	if (rpcs3::config.misc.always_start.value() && Emu.IsReady())
+	{
 		Emu.Run();
 	}
 }
 
 void GameViewer::RightClick(wxListEvent& event)
 {
-	m_popup->Destroy(m_popup->FindItemByPosition(0));
+	for (wxMenuItem *item : m_popup->GetMenuItems()) {
+		m_popup->Destroy(item);
+	}
 	
-	wxMenuItem *pMenuItemA = m_popup->Append(event.GetIndex(), _T("Remove Game"));
-	Bind(wxEVT_MENU, &GameViewer::RemoveGame, this, event.GetIndex());
+	wxMenuItem* boot_item = new wxMenuItem(m_popup, 0, _T("Boot"));
+#if defined (_WIN32)
+	// wxMenuItem::Set(Get)Font only available for the wxMSW port
+	wxFont font = GetFont();
+	font.SetWeight(wxFONTWEIGHT_BOLD);
+	boot_item->SetFont(font);
+#endif
+	m_popup->Append(boot_item);
+	m_popup->Append(1, _T("Configure"));
+	m_popup->Append(2, _T("Remove Game"));
+
+	Bind(wxEVT_MENU, &GameViewer::BootGame, this, 0);
+	Bind(wxEVT_MENU, &GameViewer::ConfigureGame, this, 1);
+	Bind(wxEVT_MENU, &GameViewer::RemoveGame, this, 2);
+
 	PopupMenu(m_popup, event.GetPoint());
+}
+
+void GameViewer::BootGame(wxCommandEvent& WXUNUSED(event))
+{
+	wxListEvent unused_event;
+	DClick(unused_event);
+}
+
+void GameViewer::ConfigureGame(wxCommandEvent& WXUNUSED(event))
+{
+	long i = GetFirstSelected();
+	if (i < 0) return;
+
+	Emu.CreateConfig(m_game_data[i].serial);
+	rpcs3::config_t custom_config { fs::get_config_dir() + "data/" + m_game_data[i].serial + "/settings.ini" };
+	custom_config.load();
+	LOG_NOTICE(LOADER, "Configure: '%s'", custom_config.path().c_str());
+	SettingsDialog(this, &custom_config);
 }
 
 void GameViewer::RemoveGame(wxCommandEvent& event)
 {
+	long i = GetFirstSelected();
+	if (i < 0) return;
+	
 	Emu.GetVFS().Init("/");
-
-	// get local path from VFS
-	std::string local_path;
-	Emu.GetVFS().GetDevice(m_path, local_path);
-	std::string del_path = local_path + "/" + this->GetItemText(event.GetId(), 6).ToStdString();
-
+	Emu.GetVFS().DeleteAll(m_path + "/" + this->GetItemText(i, 6).ToStdString());
 	Emu.GetVFS().UnMountAll();
-
-	//TODO: Replace wxWidgetsSpecific filesystem stuff?
-	WxDirDeleteTraverser deleter;
-	wxDir localDir(del_path);
-	localDir.Traverse(deleter);
-	wxRmdir(del_path); // delete empty directory
 
 	Refresh();
 }

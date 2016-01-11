@@ -1,4 +1,6 @@
 #include "stdafx.h"
+#include "stdafx_d3d12.h"
+#ifdef _MSC_VER
 #include "D3D12CommonDecompiler.h"
 
 std::string getFloatTypeNameImp(size_t elementCount)
@@ -41,7 +43,17 @@ std::string getFunctionImp(FUNCTION f)
 	case FUNCTION::FUNCTION_FRACT:
 		return "frac($0)";
 	case FUNCTION::FUNCTION_TEXTURE_SAMPLE:
-		return "$t.Sample($tsampler, $0.xy)";
+		return "$t.Sample($tsampler, $0.xy * $t_scale)";
+	case FUNCTION::FUNCTION_TEXTURE_SAMPLE_PROJ:
+		return "$t.Sample($tsampler, ($0.xy / $0.z) * $t_scale)";
+	case FUNCTION::FUNCTION_TEXTURE_SAMPLE_LOD:
+		return "$t.SampleLevel($tsampler, ($0.xy / $0.z) * $t_scale, $1)";
+	case FUNCTION::FUNCTION_TEXTURE_CUBE_SAMPLE:
+		return "$t.Sample($tsampler, $0.xyz)";
+	case FUNCTION::FUNCTION_TEXTURE_CUBE_SAMPLE_PROJ:
+		return "$t.Sample($tsampler, ($0.xyz / $0.w))";
+	case FUNCTION::FUNCTION_TEXTURE_CUBE_SAMPLE_LOD:
+		return "$t.SampleLevel($tsampler, ($0.xyz / $0.w), $1)";
 	case FUNCTION::FUNCTION_DFDX:
 		return "ddx($0)";
 	case FUNCTION::FUNCTION_DFDY:
@@ -69,3 +81,4 @@ std::string compareFunctionImp(COMPARE f, const std::string &Op0, const std::str
 		return "(" + Op0 + " != " + Op1 + ")";
 	}
 }
+#endif

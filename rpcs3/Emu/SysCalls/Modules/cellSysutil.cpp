@@ -1,15 +1,14 @@
 #include "stdafx.h"
-#include "Utilities/Log.h"
 #include "Emu/Memory/Memory.h"
 #include "Emu/System.h"
+#include "Emu/state.h"
 #include "Emu/SysCalls/Modules.h"
 #include "Emu/SysCalls/Callback.h"
 
-#include "Ini.h"
 #include "Emu/FS/VFS.h"
 #include "cellSysutil.h"
 
-extern Module cellSysutil;
+extern Module<> cellSysutil;
 
 std::unique_ptr<sysutil_t> g_sysutil;
 
@@ -45,7 +44,7 @@ s32 cellSysutilGetSystemParamInt(s32 id, vm::ptr<s32> value)
 	switch(id)
 	{
 	case CELL_SYSUTIL_SYSTEMPARAM_ID_LANG:
-		*value = Ini.SysLanguage.GetValue();
+		*value = rpcs3::config.system.language.value();
 	break;
 
 	case CELL_SYSUTIL_SYSTEMPARAM_ID_ENTER_BUTTON_ASSIGN:
@@ -148,9 +147,9 @@ void sysutilSendSystemCommand(u64 status, u64 param)
 	{
 		if (cb.func)
 		{
-			Emu.GetCallbackManager().Register([=](CPUThread& CPU) -> s32
+			Emu.GetCallbackManager().Register([=](PPUThread& ppu) -> s32
 			{
-				cb.func(static_cast<PPUThread&>(CPU), status, param, cb.arg);
+				cb.func(ppu, status, param, cb.arg);
 				return CELL_OK;
 			});
 		}
@@ -212,7 +211,7 @@ s32 cellSysCacheClear(void)
 	}
 
 	std::string localPath;
-	Emu.GetVFS().GetDevice(std::string("/dev_hdd1/cache/"), localPath);
+	Emu.GetVFS().GetDevice("/dev_hdd1/cache/", localPath);
 
 	// TODO: Write tests to figure out, what is deleted.
 
@@ -224,11 +223,11 @@ s32 cellSysCacheMount(vm::ptr<CellSysCacheParam> param)
 	cellSysutil.Warning("cellSysCacheMount(param=*0x%x)", param);
 
 	// TODO: implement
-	char id[CELL_SYSCACHE_ID_SIZE];
-	strncpy(id, param->cacheId, CELL_SYSCACHE_ID_SIZE);
-	strncpy(param->getCachePath, ("/dev_hdd1/cache/" + std::string(id) + "/").c_str(), CELL_SYSCACHE_PATH_MAX);
+	char id[CELL_SYSCACHE_ID_SIZE] = { '\0' };
+	strncpy(id, param->cacheId, CELL_SYSCACHE_ID_SIZE - 1);
+	strncpy(param->getCachePath, ("/dev_hdd1/cache/"s + id + "/").c_str(), CELL_SYSCACHE_PATH_MAX);
 	param->getCachePath[CELL_SYSCACHE_PATH_MAX - 1] = '\0';
-	Emu.GetVFS().CreateDir(std::string(param->getCachePath));
+	Emu.GetVFS().CreateDir(param->getCachePath);
 	g_sysutil->cacheMounted.exchange(true);
 
 	return CELL_SYSCACHE_RET_OK_RELAYED;
@@ -352,7 +351,7 @@ extern void cellSysutil_WebBrowser_init();
 extern void cellSysutil_AudioOut_init();
 extern void cellSysutil_VideoOut_init();
 
-Module cellSysutil("cellSysutil", []()
+Module<> cellSysutil("cellSysutil", []()
 {
 	g_sysutil = std::make_unique<sysutil_t>();
 

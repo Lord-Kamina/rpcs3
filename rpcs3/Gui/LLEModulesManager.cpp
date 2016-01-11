@@ -1,13 +1,15 @@
+#include "stdafx.h"
 #include "stdafx_gui.h"
-#include "Utilities/Log.h"
 #include "Loader/ELF64.h"
 #include "Emu/FS/vfsDir.h"
 #include "Emu/FS/vfsFile.h"
 #include "LLEModulesManager.h"
 #include "Emu/System.h"
+#include "Emu/state.h"
 #include "Emu/FS/VFS.h"
 
-LLEModulesManagerFrame::LLEModulesManagerFrame(wxWindow* parent) : FrameBase(parent, wxID_ANY, "", "LLEModulesManagerFrame", wxSize(800, 600))
+LLEModulesManagerFrame::LLEModulesManagerFrame(wxWindow* parent)
+	: wxDialog(parent, wxID_ANY, "LLEModulesManagerFrame", wxDefaultPosition, wxSize(480, 640))
 {
 	wxBoxSizer *s_panel = new wxBoxSizer(wxVERTICAL);
 	wxBoxSizer *s_p_panel = new wxBoxSizer(wxVERTICAL);
@@ -28,6 +30,7 @@ LLEModulesManagerFrame::LLEModulesManagerFrame(wxWindow* parent) : FrameBase(par
 	s_panel->Add(p_main, 1, wxEXPAND | wxALL, 5);
 	SetSizerAndFit(s_panel);
 	Refresh();
+	SetSize(350, 500);
 
 	b_select->Bind(wxEVT_BUTTON, [this](wxCommandEvent& event) { OnSelectAll(event, true); event.Skip(); });
 	b_unselect->Bind(wxEVT_BUTTON, [this](wxCommandEvent& event) { OnSelectAll(event, false); event.Skip(); });
@@ -81,13 +84,10 @@ void LLEModulesManagerFrame::Refresh()
 
 			m_funcs.push_back(name);
 
-			IniEntry<bool> load_lib;
-			load_lib.Init(name, "LLE");
-
 			m_check_list->Check(m_check_list->Append(name +
 				" v" + std::to_string((int)sprx_loader.m_sprx_module_info.version[0]) +
 				"." + std::to_string((int)sprx_loader.m_sprx_module_info.version[1])),
-				load_lib.LoadValue(false));
+				rpcs3::config.lle.get_entry_value<bool>(name, false));
 		}
 	}
 
@@ -99,9 +99,7 @@ void LLEModulesManagerFrame::UpdateSelection(int index)
 	if (index < 0)
 		return;
 
-	IniEntry<bool> load_lib;
-	load_lib.Init(m_funcs[index], "LLE");
-	load_lib.SaveValue(m_check_list->IsChecked(index));
+	rpcs3::config.lle.set_entry_value(m_funcs[index], m_check_list->IsChecked(index));
 }
 
 void LLEModulesManagerFrame::OnSelectAll(wxCommandEvent& WXUNUSED(event), bool is_checked)

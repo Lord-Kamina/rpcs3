@@ -1,122 +1,371 @@
 #pragma once
 
-enum file_seek_mode : u32
+enum class fsm : u32 // file seek mode
 {
-	from_begin,
-	from_cur,
-	from_end,
+	begin,
+	cur,
+	end,
 };
 
-enum file_open_mode : u32
+namespace fom // file open mode
 {
-	o_read = 1 << 0,
-	o_write = 1 << 1,
-	o_append = 1 << 2,
-	o_create = 1 << 3,
-	o_trunc = 1 << 4,
-	o_excl = 1 << 5,
+	enum : u32
+	{
+		read = 1 << 0, // enable reading
+		write = 1 << 1, // enable writing
+		append = 1 << 2, // enable appending (always write to the end of file)
+		create = 1 << 3, // create file if it doesn't exist
+		trunc = 1 << 4, // clear opened file if it's not empty
+		excl = 1 << 5, // failure if the file already exists (used with `create`)
+
+		rewrite = write | create | trunc, // write + create + trunc
+	};
+};
+
+enum class fse : u32 // filesystem (file or dir) error
+{
+	ok, // no error
+	invalid_arguments,
 };
 
 namespace fs
 {
+	thread_local extern fse g_tls_error;
+
 	struct stat_t
 	{
 		bool is_directory;
 		bool is_writable;
 		u64 size;
-		time_t atime;
-		time_t mtime;
-		time_t ctime;
+		s64 atime;
+		s64 mtime;
+		s64 ctime;
 	};
 
+	// Get file information
 	bool stat(const std::string& path, stat_t& info);
+
+	// Check whether a file or a directory exists (not recommended, use is_file() or is_dir() instead)
 	bool exists(const std::string& path);
+
+	// Check whether the file exists and is NOT a directory
 	bool is_file(const std::string& file);
+
+	// Check whether the directory exists and is NOT a file
 	bool is_dir(const std::string& dir);
+
+	// Delete empty directory
 	bool remove_dir(const std::string& dir);
+
+	// Create directory
 	bool create_dir(const std::string& dir);
+
+	// Create directories
 	bool create_path(const std::string& path);
+
+	// Rename (move) file or directory
 	bool rename(const std::string& from, const std::string& to);
+
+	// Copy file contents
 	bool copy_file(const std::string& from, const std::string& to, bool overwrite);
+
+	// Delete file
 	bool remove_file(const std::string& file);
+
+	// Change file size (possibly appending zeros)
 	bool truncate_file(const std::string& file, u64 length);
 
-	struct file final
+	class file final
 	{
-		using handle_type = intptr_t;
+		using handle_type = std::intptr_t;
 
-		static const handle_type null = -1;
+		constexpr static handle_type null = -1;
 
-	private:
 		handle_type m_fd = null;
+
+		friend class file_ptr;
 
 	public:
 		file() = default;
+
+		explicit file(const std::string& filename, u32 mode = fom::read)
+		{
+			open(filename, mode);
+		}
+
+		file(file&& other)
+			: m_fd(other.m_fd)
+		{
+			other.m_fd = null;
+		}
+
+		file& operator =(file&& right)
+		{
+			std::swap(m_fd, right.m_fd);
+			return *this;
+		}
+
 		~file();
-		explicit file(const std::string& filename, u32 mode = o_read) { open(filename, mode); }
 
-		file(const file&) = delete;
-		file(file&&) = delete; // possibly TODO
+		// Check whether the handle is valid (opened file)
+		bool is_opened() const
+		{
+			return m_fd != null;
+		}
 
-		file& operator =(const file&) = delete;
-		file& operator =(file&&) = delete; // possibly TODO
+		// Check whether the handle is valid (opened file)
+		explicit operator bool() const
+		{
+			return is_opened();
+		}
 
-		operator bool() const { return m_fd != null; }
+		// Open specified file with specified mode
+		bool open(const std::string& filename, u32 mode = fom::read);
 
-		void import(handle_type fd) { this->~file(); m_fd = fd; }
+		// Change file size (possibly appending zero bytes)
+		bool trunc(u64 size) const;
 
-		bool open(const std::string& filename, u32 mode = o_read);
-		bool is_opened() const { return m_fd != null; }
-		bool trunc(u64 size) const; // change file size (possibly appending zero bytes)
-		bool stat(stat_t& info) const; // get file info
+		// Get file information
+		bool stat(stat_t& info) const;
+
+		// Close the file explicitly (destructor automatically closes the file)
 		bool close();
 
+		// Read the data from the file and return the amount of data written in buffer
 		u64 read(void* buffer, u64 count) const;
+
+		// Write the data to the file and return the amount of data actually written
 		u64 write(const void* buffer, u64 count) const;
-		u64 seek(u64 offset, u32 mode = from_begin) const;
+
+		// Move file pointer
+		u64 seek(s64 offset, fsm seek_mode = fsm::begin) const;
+
+		// Get file size
 		u64 size() const;
+
+		// Write std::string
+		const file& operator <<(const std::string& str) const
+		{
+			CHECK_ASSERTION(write(str.data(), str.size()) == str.size());
+			return *this;
+		}
+
+		// Write POD
+		template<typename T>
+		std::enable_if_t<std::is_pod<T>::value && !std::is_pointer<T>::value, const file&> operator <<(const T& data) const
+		{
+			CHECK_ASSERTION(write(std::addressof(data), sizeof(T)) == sizeof(T));
+			return *this;
+		}
+
+		// Write POD std::vector
+		template<typename T>
+		std::enable_if_t<std::is_pod<T>::value && !std::is_pointer<T>::value, const file&> operator <<(const std::vector<T>& vec) const
+		{
+			CHECK_ASSERTION(write(vec.data(), vec.size() * sizeof(T)) == vec.size() * sizeof(T));
+			return *this;
+		}
+
+		// Read std::string
+		bool read(std::string& str) const
+		{
+			return read(&str[0], str.size()) == str.size();
+		}
+
+		// Read POD
+		template<typename T>
+		std::enable_if_t<std::is_pod<T>::value && !std::is_pointer<T>::value, bool> read(T& data) const
+		{
+			return read(&data, sizeof(T)) == sizeof(T);
+		}
+
+		// Read POD std::vector
+		template<typename T>
+		std::enable_if_t<std::is_pod<T>::value && !std::is_pointer<T>::value, bool> read(std::vector<T>& vec) const
+		{
+			return read(vec.data(), sizeof(T) * vec.size()) == sizeof(T) * vec.size();
+		}
+
+		// Convert to std::string
+		operator std::string() const
+		{
+			std::string result;
+			result.resize(size() - seek(0, fsm::cur));
+			CHECK_ASSERTION(read(result));
+			return result;
+		}
 	};
 
-	struct dir final
+	class file_ptr final
 	{
-#ifdef _WIN32
-		using handle_type = intptr_t;
-		using name_type = std::unique_ptr<wchar_t[]>;
+		char* m_ptr = nullptr;
+		u64 m_size;
 
-		static const handle_type null = -1;
-#else
-		using handle_type = intptr_t;
-		using name_type = std::unique_ptr<char[]>;
+	public:
+		file_ptr() = default;
 
-		static const handle_type null = 0;
-#endif
+		file_ptr(file_ptr&& right)
+			: m_ptr(right.m_ptr)
+			, m_size(right.m_size)
+		{
+			right.m_ptr = 0;
+		}
 
-	private:
-		handle_type m_dd = null;
-		name_type m_path;
+		file_ptr& operator =(file_ptr&& right)
+		{
+			std::swap(m_ptr, right.m_ptr);
+			std::swap(m_size, right.m_size);
+			return *this;
+		}
+
+		file_ptr(const file& f)
+		{
+			reset(f);
+		}
+
+		~file_ptr()
+		{
+			reset();
+		}
+
+		// Open file mapping
+		void reset(const file& f);
+		
+		// Close file mapping
+		void reset();
+
+		// Get pointer
+		operator char*() const
+		{
+			return m_ptr;
+		}
+	};
+
+	class dir final
+	{
+		std::unique_ptr<char[]> m_path;
+		std::intptr_t m_dd; // handle (aux)
 
 	public:
 		dir() = default;
+
+		explicit dir(const std::string& dirname)
+		{
+			open(dirname);
+		}
+
+		dir(dir&& other)
+			: m_dd(other.m_dd)
+			, m_path(std::move(other.m_path))
+		{
+		}
+
+		dir& operator =(dir&& right)
+		{
+			std::swap(m_dd, right.m_dd);
+			std::swap(m_path, right.m_path);
+			return *this;
+		}
+
 		~dir();
-		explicit dir(const std::string& dirname) { open(dirname); }
 
-		dir(const dir&) = delete;
-		dir(dir&&) = delete; // possibly TODO
+		// Check whether the handle is valid (opened directory)
+		bool is_opened() const
+		{
+			return m_path.operator bool();
+		}
 
-		dir& operator =(const dir&) = delete;
-		dir& operator =(dir&&) = delete; // possibly TODO
+		// Check whether the handle is valid (opened directory)
+		explicit operator bool() const
+		{
+			return is_opened();
+		}
 
-		operator bool() const { return m_path.operator bool(); }
-
-		void import(handle_type dd, const std::string& path);
-
+		// Open specified directory
 		bool open(const std::string& dirname);
-		bool is_opened() const { return *this; }
+		
+		// Close the directory explicitly (destructor automatically closes the directory)
 		bool close();
 
-		bool get_first(std::string& name, stat_t& info);
-		//bool get_first(std::string& name);
-		bool get_next(std::string& name, stat_t& info);
-		//bool get_next(std::string& name);
+		// Get next directory entry (UTF-8 name and file stat)
+		bool read(std::string& name, stat_t& info);
+
+		bool first(std::string& name, stat_t& info);
+
+		struct entry
+		{
+			std::string name;
+			stat_t info;
+		};
+
+		class iterator
+		{
+			entry m_entry;
+			dir* m_parent;
+
+		public:
+			enum class mode
+			{
+				from_first,
+				from_current
+			};
+
+			iterator(dir* parent, mode mode_ = mode::from_first)
+				: m_parent(parent)
+			{
+				if (!m_parent)
+				{
+					return;
+				}
+
+				bool is_ok;
+
+				if (mode_ == mode::from_first)
+				{
+					is_ok = m_parent->first(m_entry.name, m_entry.info);
+				}
+				else
+				{
+					is_ok = m_parent->read(m_entry.name, m_entry.info);
+				}
+
+				if (!is_ok)
+				{
+					m_parent = nullptr;
+				}
+			}
+
+			entry& operator *()
+			{
+				return m_entry;
+			}
+
+			iterator& operator++()
+			{
+				*this = { m_parent, mode::from_current };
+				return *this;
+			}
+
+			bool operator !=(const iterator& rhs) const
+			{
+				return m_parent != rhs.m_parent;
+			}
+		};
+
+		iterator begin()
+		{
+			return{ this };
+		}
+
+		iterator end()
+		{
+			return{ nullptr };
+		}
 	};
+
+	// Get configuration directory
+	std::string get_config_dir();
+
+	// Get executable directory
+	std::string get_executable_dir();
 }

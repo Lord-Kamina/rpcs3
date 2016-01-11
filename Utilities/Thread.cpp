@@ -1,7 +1,7 @@
 #include "stdafx.h"
 #include "Log.h"
-#include "rpcs3/Ini.h"
 #include "Emu/System.h"
+#include "Emu/state.h"
 #include "Emu/CPU/CPUThreadManager.h"
 #include "Emu/CPU/CPUThread.h"
 #include "Emu/Cell/RawSPUThread.h"
@@ -18,6 +18,34 @@
 #include <signal.h>
 #include <ucontext.h>
 #endif
+
+void report_fatal_error(const std::string& msg)
+{
+#ifdef _WIN32
+	const auto& text = msg + "\n\nPlease report this error to the developers. Press (Ctrl+C) to copy this message.";
+	MessageBoxA(0, text.c_str(), "Fatal error", MB_ICONERROR); // TODO: unicode message
+#else
+	std::printf("Fatal error: %s\nPlease report this error to the developers.\n", msg.c_str());
+#endif
+}
+
+[[noreturn]] void catch_all_exceptions()
+{
+	try
+	{
+		throw;
+	}
+	catch (const std::exception& ex)
+	{
+		report_fatal_error("Unhandled exception: "s + ex.what());
+	}
+	catch (...)
+	{
+		report_fatal_error("Unhandled exception (unknown)");
+	}
+
+	std::abort();
+}
 
 void SetCurrentThreadDebugName(const char* threadName)
 {
@@ -113,10 +141,11 @@ enum x64_op_t : u32
 	X64OP_STOS,
 	X64OP_XCHG,
 	X64OP_CMPXCHG,
-	X64OP_LOAD_AND_STORE, // lock and [mem],reg
-	X64OP_LOAD_OR_STORE, // TODO: lock or [mem], reg
-	X64OP_INC, // TODO: lock inc [mem]
-	X64OP_DEC, // TODO: lock dec [mem]
+	X64OP_LOAD_AND_STORE, // lock and [mem], reg
+	X64OP_LOAD_OR_STORE,  // lock or  [mem], reg (TODO)
+	X64OP_LOAD_XOR_STORE, // lock xor [mem], reg (TODO)
+	X64OP_INC, // lock inc [mem] (TODO)
+	X64OP_DEC, // lock dec [mem] (TODO)
 };
 
 void decode_x64_reg_op(const u8* code, x64_op_t& out_op, x64_reg_t& out_reg, size_t& out_size, size_t& out_length)
@@ -492,8 +521,11 @@ void decode_x64_reg_op(const u8* code, x64_op_t& out_op, x64_reg_t& out_reg, siz
 typedef CONTEXT x64_context;
 
 #define X64REG(context, reg) (&(&(context)->Rax)[reg])
-#define XMMREG(context, reg) (reinterpret_cast<u128*>(&(&(context)->Xmm0)[reg]))
+#define XMMREG(context, reg) (reinterpret_cast<v128*>(&(&(context)->Xmm0)[reg]))
 #define EFLAGS(context) ((context)->EFlags)
+
+#define ARG1(context) RCX(context)
+#define ARG2(context) RDX(context)
 
 #else
 
@@ -502,7 +534,7 @@ typedef ucontext_t x64_context;
 #ifdef __APPLE__
 
 #define X64REG(context, reg) (darwin_x64reg(context, reg))
-#define XMMREG(context, reg) (reinterpret_cast<u128*>(&(context)->uc_mcontext->__fs.__fpu_xmm0.__xmm_reg[reg]))
+#define XMMREG(context, reg) (reinterpret_cast<v128*>(&(context)->uc_mcontext->__fs.__fpu_xmm0.__xmm_reg[reg]))
 #define EFLAGS(context) ((context)->uc_mcontext->__ss.__rflags)
 
 uint64_t* darwin_x64reg(x64_context *context, int reg)
@@ -510,66 +542,52 @@ uint64_t* darwin_x64reg(x64_context *context, int reg)
 	auto *state = &context->uc_mcontext->__ss;
 	switch(reg)
 	{
-	case 0: // RAX
-		return &state->__rax;
-	case 1: // RCX
-		return &state->__rcx;
-	case 2: // RDX
-		return &state->__rdx;
-	case 3: // RBX
-		return &state->__rbx;
-	case 4: // RSP
-		return &state->__rsp;
-	case 5: // RBP
-		return &state->__rbp;
-	case 6: // RSI
-		return &state->__rsi;
-	case 7: // RDI
-		return &state->__rdi;
-	case 8: // R8
-		return &state->__r8;
-	case 9: // R9
-		return &state->__r9;
-	case 10: // R10
-		return &state->__r10;
-	case 11: // R11
-		return &state->__r11;
-	case 12: // R12
-		return &state->__r12;
-	case 13: // R13
-		return &state->__r13;
-	case 14: // R14
-		return &state->__r14;
-	case 15: // R15
-		return &state->__r15;
-	case 16: // RIP
-		return &state->__rip;
-	default: // FAIL
-		assert(0);
+	case 0: return &state->__rax;
+	case 1: return &state->__rcx;
+	case 2: return &state->__rdx;
+	case 3: return &state->__rbx;
+	case 4: return &state->__rsp;
+	case 5: return &state->__rbp;
+	case 6: return &state->__rsi;
+	case 7: return &state->__rdi;
+	case 8: return &state->__r8;
+	case 9: return &state->__r9;
+	case 10: return &state->__r10;
+	case 11: return &state->__r11;
+	case 12: return &state->__r12;
+	case 13: return &state->__r13;
+	case 14: return &state->__r14;
+	case 15: return &state->__r15;
+	case 16: return &state->__rip;
+	default:
+		LOG_ERROR(GENERAL, "Invalid register index: %d", reg);
+		return nullptr;
 	}
 }
 
 #else
 
-typedef decltype(REG_RIP) reg_table_t;
-
-static const reg_table_t reg_table[17] =
+static const decltype(REG_RAX) reg_table[] =
 {
 	REG_RAX, REG_RCX, REG_RDX, REG_RBX, REG_RSP, REG_RBP, REG_RSI, REG_RDI,
 	REG_R8, REG_R9, REG_R10, REG_R11, REG_R12, REG_R13, REG_R14, REG_R15, REG_RIP
 };
 
 #define X64REG(context, reg) (&(context)->uc_mcontext.gregs[reg_table[reg]])
-#define XMMREG(context, reg) (reinterpret_cast<u128*>(&(context)->uc_mcontext.fpregs->_xmm[reg]))
+#define XMMREG(context, reg) (reinterpret_cast<v128*>(&(context)->uc_mcontext.fpregs->_xmm[reg]))
 #define EFLAGS(context) ((context)->uc_mcontext.gregs[REG_EFL])
 
 #endif // __APPLE__
+
+#define ARG1(context) RDI(context)
+#define ARG2(context) RSI(context)
 
 #endif
 
 #define RAX(c) (*X64REG((c), 0))
 #define RCX(c) (*X64REG((c), 1))
 #define RDX(c) (*X64REG((c), 2))
+#define RSP(c) (*X64REG((c), 4))
 #define RSI(c) (*X64REG((c), 6))
 #define RDI(c) (*X64REG((c), 7))
 #define RIP(c) (*X64REG((c), 16))
@@ -846,7 +864,7 @@ bool handle_access_violation(u32 addr, bool is_writing, x64_context* context)
 		case X64OP_LOAD:
 		{
 			u32 value;
-			if (is_writing || !thread->read_reg(addr, value) || !put_x64_reg_value(context, reg, d_size, _byteswap_ulong(value)))
+			if (is_writing || !thread->read_reg(addr, value) || !put_x64_reg_value(context, reg, d_size, se_storage<u32>::swap(value)))
 			{
 				return false;
 			}
@@ -856,7 +874,7 @@ bool handle_access_violation(u32 addr, bool is_writing, x64_context* context)
 		case X64OP_STORE:
 		{
 			u64 reg_value;
-			if (!is_writing || !get_x64_reg_value(context, reg, d_size, i_size, reg_value) || !thread->write_reg(addr, _byteswap_ulong((u32)reg_value)))
+			if (!is_writing || !get_x64_reg_value(context, reg, d_size, i_size, reg_value) || !thread->write_reg(addr, se_storage<u32>::swap((u32)reg_value)))
 			{
 				return false;
 			}
@@ -901,7 +919,7 @@ bool handle_access_violation(u32 addr, bool is_writing, x64_context* context)
 					return false;
 				}
 
-				memcpy(vm::priv_ptr(addr), XMMREG(context, reg - X64R_XMM0), 16);
+				std::memcpy(vm::base_priv(addr), XMMREG(context, reg - X64R_XMM0), 16);
 				break;
 			}
 
@@ -911,7 +929,7 @@ bool handle_access_violation(u32 addr, bool is_writing, x64_context* context)
 				return false;
 			}
 
-			memcpy(vm::priv_ptr(addr), &reg_value, d_size);
+			std::memcpy(vm::base_priv(addr), &reg_value, d_size);
 			break;
 		}
 		case X64OP_MOVS:
@@ -922,7 +940,7 @@ bool handle_access_violation(u32 addr, bool is_writing, x64_context* context)
 				return false;
 			}
 
-			if (vm::get_ptr(addr) != (void*)RDI(context))
+			if (vm::base(addr) != (void*)RDI(context))
 			{
 				LOG_ERROR(MEMORY, "X64OP_MOVS: rdi=0x%llx, rsi=0x%llx, addr=0x%x", (u64)RDI(context), (u64)RSI(context), addr);
 				return false;
@@ -935,8 +953,8 @@ bool handle_access_violation(u32 addr, bool is_writing, x64_context* context)
 				u64 value;
 
 				// copy data
-				memcpy(&value, (void*)RSI(context), d_size);
-				memcpy(vm::priv_ptr(a_addr), &value, d_size);
+				std::memcpy(&value, (void*)RSI(context), d_size);
+				std::memcpy(vm::base_priv(a_addr), &value, d_size);
 
 				// shift pointers
 				if (EFLAGS(context) & 0x400 /* direction flag */)
@@ -977,7 +995,7 @@ bool handle_access_violation(u32 addr, bool is_writing, x64_context* context)
 				return false;
 			}
 
-			if (vm::get_ptr(addr) != (void*)RDI(context))
+			if (vm::base(addr) != (void*)RDI(context))
 			{
 				LOG_ERROR(MEMORY, "X64OP_STOS: rdi=0x%llx, addr=0x%x", (u64)RDI(context), addr);
 				return false;
@@ -994,7 +1012,7 @@ bool handle_access_violation(u32 addr, bool is_writing, x64_context* context)
 			while (a_addr >> 12 == addr >> 12)
 			{
 				// fill data with value
-				memcpy(vm::priv_ptr(a_addr), &value, d_size);
+				std::memcpy(vm::base_priv(a_addr), &value, d_size);
 
 				// shift pointers
 				if (EFLAGS(context) & 0x400 /* direction flag */)
@@ -1035,10 +1053,10 @@ bool handle_access_violation(u32 addr, bool is_writing, x64_context* context)
 
 			switch (d_size)
 			{
-			case 1: reg_value = vm::priv_ref<atomic_t<u8>>(addr).exchange((u8)reg_value); break;
-			case 2: reg_value = vm::priv_ref<atomic_t<u16>>(addr).exchange((u16)reg_value); break;
-			case 4: reg_value = vm::priv_ref<atomic_t<u32>>(addr).exchange((u32)reg_value); break;
-			case 8: reg_value = vm::priv_ref<atomic_t<u64>>(addr).exchange((u64)reg_value); break;
+			case 1: reg_value = sync_lock_test_and_set((u8*)vm::base_priv(addr), (u8)reg_value); break;
+			case 2: reg_value = sync_lock_test_and_set((u16*)vm::base_priv(addr), (u16)reg_value); break;
+			case 4: reg_value = sync_lock_test_and_set((u32*)vm::base_priv(addr), (u32)reg_value); break;
+			case 8: reg_value = sync_lock_test_and_set((u64*)vm::base_priv(addr), (u64)reg_value); break;
 			default: return false;
 			}
 
@@ -1058,10 +1076,10 @@ bool handle_access_violation(u32 addr, bool is_writing, x64_context* context)
 
 			switch (d_size)
 			{
-			case 1: old_value = vm::priv_ref<atomic_t<u8>>(addr).compare_and_swap((u8)cmp_value, (u8)reg_value); break;
-			case 2: old_value = vm::priv_ref<atomic_t<u16>>(addr).compare_and_swap((u16)cmp_value, (u16)reg_value); break;
-			case 4: old_value = vm::priv_ref<atomic_t<u32>>(addr).compare_and_swap((u32)cmp_value, (u32)reg_value); break;
-			case 8: old_value = vm::priv_ref<atomic_t<u64>>(addr).compare_and_swap((u64)cmp_value, (u64)reg_value); break;
+			case 1: old_value = sync_val_compare_and_swap((u8*)vm::base_priv(addr), (u8)cmp_value, (u8)reg_value); break;
+			case 2: old_value = sync_val_compare_and_swap((u16*)vm::base_priv(addr), (u16)cmp_value, (u16)reg_value); break;
+			case 4: old_value = sync_val_compare_and_swap((u32*)vm::base_priv(addr), (u32)cmp_value, (u32)reg_value); break;
+			case 8: old_value = sync_val_compare_and_swap((u64*)vm::base_priv(addr), (u64)cmp_value, (u64)reg_value); break;
 			default: return false;
 			}
 
@@ -1081,10 +1099,10 @@ bool handle_access_violation(u32 addr, bool is_writing, x64_context* context)
 
 			switch (d_size)
 			{
-			case 1: value = vm::priv_ref<atomic_t<u8>>(addr) &= (u8)value; break;
-			case 2: value = vm::priv_ref<atomic_t<u16>>(addr) &= (u16)value; break;
-			case 4: value = vm::priv_ref<atomic_t<u32>>(addr) &= (u32)value; break;
-			case 8: value = vm::priv_ref<atomic_t<u64>>(addr) &= value; break;
+			case 1: value &= sync_fetch_and_and((u8*)vm::base_priv(addr), (u8)value); break;
+			case 2: value &= sync_fetch_and_and((u16*)vm::base_priv(addr), (u16)value); break;
+			case 4: value &= sync_fetch_and_and((u32*)vm::base_priv(addr), (u32)value); break;
+			case 8: value &= sync_fetch_and_and((u64*)vm::base_priv(addr), (u64)value); break;
 			default: return false;
 			}
 
@@ -1110,28 +1128,32 @@ bool handle_access_violation(u32 addr, bool is_writing, x64_context* context)
 	// TODO: allow recovering from a page fault as a feature of PS3 virtual memory
 }
 
-#ifdef _WIN32
-
-void _se_translator(unsigned int u, EXCEPTION_POINTERS* pExp)
+// Throw virtual memory access violation exception
+[[noreturn]] void throw_access_violation(const char* cause, u32 address) // Don't change function definition
 {
-	const u64 addr64 = (u64)pExp->ExceptionRecord->ExceptionInformation[1] - (u64)vm::g_base_addr;
-	const bool is_writing = pExp->ExceptionRecord->ExceptionInformation[0] != 0;
-
-	if (u == EXCEPTION_ACCESS_VIOLATION && (u32)addr64 == addr64)
-	{
-		throw EXCEPTION("Access violation %s location 0x%llx", is_writing ? "writing" : "reading", addr64);
-	}
+	throw EXCEPTION("Access violation %s location 0x%08x", cause, address);
 }
 
-const PVOID exception_handler = (atexit([]{ RemoveVectoredExceptionHandler(exception_handler); }), AddVectoredExceptionHandler(1, [](PEXCEPTION_POINTERS pExp) -> LONG
+// Modify context in order to convert hardware exception to C++ exception
+void prepare_throw_access_violation(x64_context* context, const char* cause, u32 address)
 {
-	const u64 addr64 = (u64)pExp->ExceptionRecord->ExceptionInformation[1] - (u64)vm::g_base_addr;
+	// Set throw_access_violation() call args (old register values are lost)
+	ARG1(context) = (u64)cause;
+	ARG2(context) = address;
+
+	// Push the exception address as a "return" address (throw_access_violation() shall not return)
+	*--(u64*&)(RSP(context)) = RIP(context);
+	RIP(context) = (u64)std::addressof(throw_access_violation);
+}
+
+#ifdef _WIN32
+
+const auto g_exception_handler = AddVectoredExceptionHandler(1, [](PEXCEPTION_POINTERS pExp) -> LONG
+{
+	const u64 addr64 = pExp->ExceptionRecord->ExceptionInformation[1] - (u64)vm::base(0);
 	const bool is_writing = pExp->ExceptionRecord->ExceptionInformation[0] != 0;
 
-	if (pExp->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION &&
-		(u32)addr64 == addr64 &&
-		get_current_thread_ctrl() &&
-		handle_access_violation((u32)addr64, is_writing, pExp->ContextRecord))
+	if (pExp->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && addr64 < 0x100000000ull && thread_ctrl::get_current() && handle_access_violation((u32)addr64, is_writing, pExp->ContextRecord))
 	{
 		return EXCEPTION_CONTINUE_EXECUTION;
 	}
@@ -1139,12 +1161,40 @@ const PVOID exception_handler = (atexit([]{ RemoveVectoredExceptionHandler(excep
 	{
 		return EXCEPTION_CONTINUE_SEARCH;
 	}
-}));
+});
 
-const auto exception_filter = SetUnhandledExceptionFilter([](PEXCEPTION_POINTERS pExp) -> LONG
+const auto g_exception_filter = SetUnhandledExceptionFilter([](PEXCEPTION_POINTERS pExp) -> LONG
 {
-	_se_translator(pExp->ExceptionRecord->ExceptionCode, pExp);
+	std::string msg = fmt::format("Unhandled Win32 exception 0x%08X.\n", pExp->ExceptionRecord->ExceptionCode);
 
+	if (pExp->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION)
+	{
+		const u64 addr64 = pExp->ExceptionRecord->ExceptionInformation[1] - (u64)vm::base(0);
+		const auto cause = pExp->ExceptionRecord->ExceptionInformation[0] != 0 ? "writing" : "reading";
+
+		if (addr64 < 0x100000000ull)
+		{
+			// Setup throw_access_violation() call on the context
+			prepare_throw_access_violation(pExp->ContextRecord, cause, (u32)addr64);
+			return EXCEPTION_CONTINUE_EXECUTION;
+		}
+
+		msg += fmt::format("Access violation %s location %p at %p.\n", cause, pExp->ExceptionRecord->ExceptionInformation[1], pExp->ExceptionRecord->ExceptionAddress);
+	}
+	else
+	{
+		msg += fmt::format("Exception address: %p.\n", pExp->ExceptionRecord->ExceptionAddress);
+
+		for (DWORD i = 0; i < pExp->ExceptionRecord->NumberParameters; i++)
+		{
+			msg += fmt::format("ExceptionInformation[0x%x]: %p.\n", i, pExp->ExceptionRecord->ExceptionInformation[i]);
+		}
+	}
+
+	msg += fmt::format("Image base: %p.", GetModuleHandle(NULL));
+
+	// Report fatal error
+	report_fatal_error(msg);
 	return EXCEPTION_CONTINUE_SEARCH;
 });
 
@@ -1152,30 +1202,35 @@ const auto exception_filter = SetUnhandledExceptionFilter([](PEXCEPTION_POINTERS
 
 void signal_handler(int sig, siginfo_t* info, void* uct)
 {
-	const u64 addr64 = (u64)info->si_addr - (u64)vm::g_base_addr;
+	x64_context* context = (ucontext_t*)uct;
 
 #ifdef __APPLE__
-	const bool is_writing = ((ucontext_t*)uct)->uc_mcontext->__es.__err & 0x2;
+	const bool is_writing = context->uc_mcontext->__es.__err & 0x2;
 #else
-	const bool is_writing = ((ucontext_t*)uct)->uc_mcontext.gregs[REG_ERR] & 0x2;
+	const bool is_writing = context->uc_mcontext.gregs[REG_ERR] & 0x2;
 #endif
 
-	if ((u32)addr64 == addr64 && get_current_thread_ctrl())
+	const u64 addr64 = (u64)info->si_addr - (u64)vm::base(0);
+	const auto cause = is_writing ? "writing" : "reading";
+
+	if (addr64 < 0x100000000ull && thread_ctrl::get_current())
 	{
-		if (handle_access_violation((u32)addr64, is_writing, (ucontext_t*)uct))
+		// Try to process access violation
+		if (!handle_access_violation((u32)addr64, is_writing, context))
 		{
-			return; // proceed execution
+			// Setup throw_access_violation() call on the context
+			prepare_throw_access_violation(context, cause, (u32)addr64);
 		}
-
-		// TODO: this may be wrong
-		throw EXCEPTION("Access violation %s location 0x%llx", is_writing ? "writing" : "reading", addr64);
 	}
-
-	// else some fatal error
-	exit(EXIT_FAILURE);
+	else
+	{
+		// TODO (debugger interaction)
+		report_fatal_error(fmt::format("Access violation %s location %p at %p.", cause, info->si_addr, RIP(context)));
+		std::abort();
+	}
 }
 
-const int sigaction_result = []() -> int
+int setup_signal_handler()
 {
 	struct sigaction sa;
 
@@ -1183,222 +1238,145 @@ const int sigaction_result = []() -> int
 	sigemptyset(&sa.sa_mask);
 	sa.sa_sigaction = signal_handler;
 	return sigaction(SIGSEGV, &sa, NULL);
-}();
+}
+
+const int g_sigaction_result = setup_signal_handler();
 
 #endif
 
-thread_local thread_ctrl_t* g_tls_this_thread = nullptr;
+thread_local thread_ctrl* thread_ctrl::g_tls_this_thread = nullptr;
 
-const thread_ctrl_t* get_current_thread_ctrl()
-{
-	return g_tls_this_thread;
-}
-
-std::string thread_ctrl_t::get_name() const
-{
-	return name();
-}
-
-void thread_ctrl_t::set_current()
-{
-	const auto old_value = g_tls_this_thread;
-
-	if (old_value == this)
-	{
-		return;
-	}
-
-	if (old_value)
-	{
-		vm::reservation_free();
-	}
-
-	if (true && assigned.exchange(true))
-	{
-		LOG_ERROR(GENERAL, "Thread '%s' was already assigned to g_tls_this_thread of another thread", get_name());
-		g_tls_this_thread = nullptr;
-	}
-	else
-	{
-		g_tls_this_thread = this;
-	}
-
-	if (old_value)
-	{
-		old_value->assigned = false;
-	}
-}
-
-thread_t::thread_t(std::function<std::string()> name, std::function<void()> func)
-{
-	start(std::move(name), func);
-}
-
-thread_t::~thread_t() noexcept(false)
-{
-	if (m_thread)
-	{
-		throw EXCEPTION("Neither joined nor detached");
-	}
-}
-
-std::string thread_t::get_name() const
-{
-	if (!m_thread)
-	{
-		throw EXCEPTION("Invalid thread");
-	}
-
-	if (!m_thread->name)
-	{
-		throw EXCEPTION("Invalid name getter");
-	}
-
-	return m_thread->name();
-}
-
+// TODO
 std::atomic<u32> g_thread_count{ 0 };
 
-void thread_t::start(std::function<std::string()> name, std::function<void()> func)
+void thread_ctrl::initialize()
 {
-	if (m_thread)
-	{
-		throw EXCEPTION("Thread already exists");
-	}
-
-	// create new thread control variable
-	m_thread = std::make_shared<thread_ctrl_t>(std::move(name));
-
-	// start thread
-	m_thread->m_thread = std::thread([](std::shared_ptr<thread_ctrl_t> ctrl, std::function<void()> func)
-	{
-		g_thread_count++;
-
-		SetCurrentThreadDebugName(ctrl->get_name().c_str());
-
-#if defined(_MSC_VER)
-		auto old_se_translator = _set_se_translator(_se_translator);
-#endif
+	SetCurrentThreadDebugName(g_tls_this_thread->m_name().c_str());
 
 #ifdef _WIN32
-		if (!exception_handler || !exception_filter)
-		{
-			LOG_ERROR(GENERAL, "exception_handler not set");
-			return;
-		}
+	if (!g_exception_handler || !g_exception_filter)
 #else
-		if (sigaction_result == -1)
-		{
-			printf("sigaction() failed");
-			exit(EXIT_FAILURE);
-		}
+	if (g_sigaction_result == -1)
 #endif
+	{
+		report_fatal_error("Exception handler is not set correctly.");
+		std::abort();
+	}
 
-		// error handler
-		const auto error = [&](const char* text)
-		{
-			log_message(GENERAL, Emu.IsStopped() ? Log::Severity::Warning : Log::Severity::Error, "Exception: %s", text);
-			Emu.Pause();
-		};
+	// TODO
+	g_thread_count++;
+}
 
+void thread_ctrl::finalize() noexcept
+{
+	// TODO
+	vm::reservation_free();
+
+	// TODO
+	g_thread_count--;
+
+	// Call atexit functions
+	for (const auto& func : decltype(m_atexit)(std::move(g_tls_this_thread->m_atexit)))
+	{
+		func();
+	}
+}
+
+thread_ctrl::~thread_ctrl()
+{
+	m_thread.detach();
+
+	if (m_future.valid())
+	{
 		try
 		{
-			ctrl->set_current();
+			m_future.get();
+		}
+		catch (...)
+		{
+			catch_all_exceptions();
+		}
+	}
+}
 
-			if (Ini.HLELogging.GetValue())
+std::string thread_ctrl::get_name() const
+{
+	CHECK_ASSERTION(m_name);
+
+	return m_name();
+}
+
+std::string named_thread_t::get_name() const
+{
+	return fmt::format("('%s') Unnamed Thread", typeid(*this).name());
+}
+
+void named_thread_t::start()
+{
+	CHECK_ASSERTION(!m_thread);
+
+	// Get shared_ptr instance (will throw if called from the constructor or the object has been created incorrectly)
+	auto ptr = shared_from_this();
+
+	// Make name getter
+	auto name = [wptr = std::weak_ptr<named_thread_t>(ptr), type = &typeid(*this)]()
+	{
+		// Return actual name if available
+		if (const auto ptr = wptr.lock())
+		{
+			return ptr->get_name();
+		}
+		else
+		{
+			return fmt::format("('%s') Deleted Thread", type->name());
+		}
+	};
+
+	// Run thread
+	m_thread = thread_ctrl::spawn(std::move(name), [thread = std::move(ptr)]()
+	{
+		try
+		{
+			if (rpcs3::config.misc.log.hle_logging.value())
 			{
 				LOG_NOTICE(GENERAL, "Thread started");
 			}
 
-			func();
+			thread->on_task();
+
+			if (rpcs3::config.misc.log.hle_logging.value())
+			{
+				LOG_NOTICE(GENERAL, "Thread ended");
+			}
 		}
-		catch (const char* e) // obsolete
+		catch (const std::exception& e)
 		{
-			LOG_ERROR(GENERAL, "Deprecated exception type (const char*)");
-			error(e);
+			LOG_ERROR(GENERAL, "Exception: %s\nPlease report this to the developers.", e.what());
+			Emu.Pause();
 		}
-		catch (const std::string& e) // obsolete
+		catch (EmulationStopped)
 		{
-			LOG_ERROR(GENERAL, "Deprecated exception type (std::string)");
-			error(e.c_str());
-		}
-		catch (const fmt::exception& e)
-		{
-			error(e);
+			LOG_NOTICE(GENERAL, "Thread aborted");
 		}
 
-		if (Ini.HLELogging.GetValue())
-		{
-			LOG_NOTICE(GENERAL, "Thread ended");
-		}
-
-		//ctrl->set_current(false);
-
-		vm::reservation_free();
-
-		g_thread_count--;
-
-#if defined(_MSC_VER)
-		_set_se_translator(old_se_translator);
-#endif
-	}, m_thread, std::move(func));
+		thread->on_exit();
+	});
 }
 
-void thread_t::detach()
+void named_thread_t::join()
 {
-	if (!m_thread)
+	CHECK_ASSERTION(m_thread != nullptr);
+
+	try
 	{
-		throw EXCEPTION("Invalid thread");
+		m_thread->join();
+		m_thread.reset();
 	}
-
-	// +clear m_thread
-	const auto ctrl = std::move(m_thread);
-
-	// notify if detached by another thread
-	if (g_tls_this_thread != m_thread.get())
+	catch (...)
 	{
-		// lock for reliable notification
-		std::lock_guard<std::mutex> lock(mutex);
-
-		cv.notify_one();
+		m_thread.reset();
+		throw;
 	}
-
-	ctrl->m_thread.detach();
-}
-
-void thread_t::join()
-{
-	if (!m_thread)
-	{
-		throw EXCEPTION("Invalid thread");
-	}
-
-	if (g_tls_this_thread == m_thread.get())
-	{
-		throw EXCEPTION("Deadlock");
-	}
-
-	// +clear m_thread
-	const auto ctrl = std::move(m_thread);
-
-	{
-		// lock for reliable notification
-		std::lock_guard<std::mutex> lock(mutex);
-
-		cv.notify_one();
-	}
-
-	ctrl->m_thread.join();
-}
-
-bool thread_t::is_current() const
-{
-	if (!m_thread)
-	{
-		throw EXCEPTION("Invalid thread");
-	}
-
-	return g_tls_this_thread == m_thread.get();
 }
 
 const std::function<bool()> SQUEUE_ALWAYS_EXIT = [](){ return true; };

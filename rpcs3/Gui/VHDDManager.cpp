@@ -1,8 +1,8 @@
+#include "stdafx.h"
 #include "stdafx_gui.h"
-#include "Utilities/Log.h"
 #include "VHDDManager.h"
 #include "TextInputDialog.h"
-#include "Ini.h"
+#include "Emu/state.h"
 #include <wx/busyinfo.h>
 
 VHDDListDropTarget::VHDDListDropTarget(wxListView* parent) : m_parent(parent)
@@ -122,7 +122,7 @@ void VHDDExplorer::Import(const std::string& path, const std::string& to)
 		return;
 	}
 
-	if(!m_hdd->Open(to, o_write))
+	if(!m_hdd->Open(to, fom::write))
 	{
 		wxMessageBox("IMPORT ERROR: file open error.");
 		return;
@@ -250,20 +250,18 @@ void VHDDExplorer::OnRemove(wxCommandEvent& event)
 void VHDDExplorer::OnCreateDir(wxCommandEvent& event)
 {
 	int i = 1;
-	static const std::string& fmt = "New Dir (%d)";
-	while(m_hdd->HasEntry(fmt::Format(fmt.c_str(), i))) i++;
+	while(m_hdd->HasEntry(fmt::format("New Dir (%d)", i))) i++;
 
-	m_hdd->Create(vfsHDD_Entry_Dir, fmt::Format(fmt.c_str(), i));
+	m_hdd->Create(vfsHDD_Entry_Dir, fmt::format("New Dir (%d)", i));
 	UpdateList();
 }
 
 void VHDDExplorer::OnCreateFile(wxCommandEvent& event)
 {
 	int i = 1;
-	static const std::string& fmt = "New File (%d)";
-	while (m_hdd->HasEntry(fmt::Format(fmt.c_str(), i))) i++;
+	while (m_hdd->HasEntry(fmt::format("New File (%d)", i))) i++;
 
-	m_hdd->Create(vfsHDD_Entry_File, fmt::Format(fmt.c_str(), i));
+	m_hdd->Create(vfsHDD_Entry_File, fmt::format("New File (%d)", i));
 	UpdateList();
 }
 
@@ -529,29 +527,20 @@ void VHDDManagerDialog::OnOk(wxCommandEvent& event)
 
 void VHDDManagerDialog::LoadPaths()
 {
-	IniEntry<int> path_count;
-	path_count.Init("path_count", "HDDManager");
-	size_t count = 0;
-	count = path_count.LoadValue(count);
+	size_t count = rpcs3::config.vfs.hdd_count.value();
 
-	for(size_t i=0; i<count; ++i)
+	for (size_t i = 0; i < count; ++i)
 	{
-		IniEntry<std::string> path_entry;
-		path_entry.Init(fmt::Format("path[%d]", i), "HDDManager");
-		m_paths.emplace_back(path_entry.LoadValue(""));
+		m_paths.emplace_back(rpcs3::config.vfs.get_entry_value<std::string>(fmt::format("hdd_path[%d]", i), std::string{}));
 	}
 }
 
 void VHDDManagerDialog::SavePaths()
 {
-	IniEntry<int> path_count;
-	path_count.Init("path_count", "HDDManager");
-	path_count.SaveValue(m_paths.size());
+	rpcs3::config.vfs.hdd_count = (int)m_paths.size();
 
-	for(size_t i=0; i<m_paths.size(); ++i)
+	for (size_t i = 0; i < m_paths.size(); ++i)
 	{
-		IniEntry<std::string> path_entry;
-		path_entry.Init(fmt::Format("path[%d]", i), "HDDManager");
-		path_entry.SaveValue(m_paths[i]);
+		rpcs3::config.vfs.set_entry_value(fmt::format("hdd_path[%d]", i), m_paths[i]);
 	}
 }

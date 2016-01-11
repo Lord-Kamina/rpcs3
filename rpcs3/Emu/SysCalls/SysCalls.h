@@ -1,4 +1,5 @@
 #pragma once
+
 #include "ErrorCodes.h"
 #include "LogBase.h"
 
@@ -19,11 +20,5 @@ public:
 	}
 };
 
-class PPUThread;
-
-class SysCalls
-{
-public:
-	static void DoSyscall(PPUThread& CPU, u64 code);
-	static std::string GetFuncName(const u64 fid);
-};
+void execute_syscall_by_index(class PPUThread& ppu, u64 code);
+std::string get_ps3_function_name(u64 fid);

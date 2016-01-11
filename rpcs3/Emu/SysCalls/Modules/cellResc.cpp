@@ -9,7 +9,7 @@
 #include "Emu/RSX/GSRender.h"
 #include "cellResc.h"
 
-extern Module cellResc;
+extern Module<> cellResc;
 
 extern s32 cellVideoOutConfigure(u32 videoOut, vm::ptr<CellVideoOutConfiguration> config, vm::ptr<CellVideoOutOption> option, u32 waitForEvent);
 extern s32 cellGcmSetFlipMode(u32 mode);
@@ -351,7 +351,7 @@ s32 CalculateMaxColorBuffersSize()
 	{
 		if (s_rescInternalInstance->m_initConfig.supportModes & bufMode) 
 		{
-			oneBufSize   = CalculateSurfaceByteSize(bufMode, &(s_rescInternalInstance->m_rescDsts[GetRescDestsIndex(bufMode)]));
+			oneBufSize = CalculateSurfaceByteSize(bufMode, &(s_rescInternalInstance->m_rescDsts[GetRescDestsIndex(bufMode)]));
 			bufNum       = cellRescGetNumColorBuffers(bufMode, s_rescInternalInstance->m_initConfig.palTemporalMode, 0);
 			totalBufSize = oneBufSize * bufNum;
 			maxBufSize   = (maxBufSize > totalBufSize) ? maxBufSize : totalBufSize;
@@ -468,41 +468,43 @@ void SetupRsxRenderingStates(vm::ptr<CellGcmContextData>& cntxt)
 {
 	//TODO: use cntxt
 	GSRender& r = Emu.GetGSManager().GetRender();
-	r.m_set_color_mask = true; r.m_color_mask_a = r.m_color_mask_r = r.m_color_mask_g = r.m_color_mask_b = true;
-	r.m_set_depth_mask = true; r.m_depth_mask = 0;
-	r.m_set_alpha_test = false;
-	r.m_set_blend = false;
-	r.m_set_blend_mrt1 = r.m_set_blend_mrt2 = r.m_set_blend_mrt3 = false;
-	r.m_set_logic_op = false;
-	r.m_set_cull_face = false;
-	r.m_set_depth_bounds_test = false;
-	r.m_set_depth_test = false;
-	r.m_set_poly_offset_fill = false;
-	r.m_set_stencil_test = false;
-	r.m_set_two_sided_stencil_test_enable = false;
-	r.m_set_two_side_light_enable = false;
-	r.m_set_point_sprite_control = false;
-	r.m_set_dither = true;
-	r.m_set_shade_mode = true; r.m_shade_mode = CELL_GCM_SMOOTH;
-	r.m_set_frequency_divider_operation = CELL_GCM_FREQUENCY_DIVIDE;
 
-	r.m_set_viewport_horizontal = r.m_set_viewport_vertical = true;
-	r.m_viewport_x = 0;
-	r.m_viewport_y = 0;
-	r.m_viewport_w = s_rescInternalInstance->m_dstWidth;
-	r.m_viewport_h = s_rescInternalInstance->m_dstHeight;
+	// FIXME: only RSX Thread can write rsx::method_registers
+	// Others threads must fill the command buffer or use another
+	// mechanism.
 
-	r.m_set_scissor_horizontal = r.m_set_scissor_vertical = true;
-	r.m_scissor_x = 0;
-	r.m_scissor_y = 0;
-	r.m_scissor_w = s_rescInternalInstance->m_dstWidth;
-	r.m_scissor_h = s_rescInternalInstance->m_dstHeight;
+//	rsx::method_registers[NV4097_SET_COLOR_MASK] = -1;
+//	rsx::method_registers[NV4097_SET_DEPTH_MASK] = 0;
+//	rsx::method_registers[NV4097_SET_ALPHA_TEST_ENABLE] = false;
+//	rsx::method_registers[NV4097_SET_BLEND_ENABLE] = false;
+//	rsx::method_registers[NV4097_SET_BLEND_ENABLE_MRT] = false;
+//	r.m_set_logic_op = false;
+//	rsx::method_registers[NV4097_SET_CULL_FACE_ENABLE] = false;
+//	r.m_set_depth_bounds_test = false;
+//	rsx::method_registers[NV4097_SET_DEPTH_TEST_ENABLE] = false;
+//	r.m_set_poly_offset_fill = false;
+//	r.m_set_stencil_test = false;
+//	r.m_set_two_sided_stencil_test_enable = false;
+//	r.m_set_two_side_light_enable = false;
+//	r.m_set_point_sprite_control = false;
+//	r.m_set_dither = true;
+//	r.m_set_shade_mode = true; r.m_shade_mode = CELL_GCM_SMOOTH;
+//	r.m_set_frequency_divider_operation = CELL_GCM_FREQUENCY_DIVIDE;
 
-	r.m_width = s_rescInternalInstance->m_dstWidth;
-	r.m_height = s_rescInternalInstance->m_dstHeight;
+//	rsx::method_registers[NV4097_SET_SURFACE_CLIP_HORIZONTAL] = s_rescInternalInstance->m_dstWidth << 16;
+//	rsx::method_registers[NV4097_SET_SURFACE_CLIP_VERTICAL] = s_rescInternalInstance->m_dstHeight << 16;
 
-	r.m_surface_depth_format = 2;
-	r.m_surface_color_target = 1;
+//	r.m_set_scissor_horizontal = r.m_set_scissor_vertical = true;
+//	r.m_scissor_x = 0;
+//	r.m_scissor_y = 0;
+//	r.m_scissor_w = s_rescInternalInstance->m_dstWidth;
+//	r.m_scissor_h = s_rescInternalInstance->m_dstHeight;
+
+//	r.m_width = s_rescInternalInstance->m_dstWidth;
+//	r.m_height = s_rescInternalInstance->m_dstHeight;
+
+//	r.m_surface_depth_format = 2;
+//	rsx::method_registers[NV4097_SET_SURFACE_COLOR_TARGET] = 1;
 
 	if (IsPalInterpolate()) 
 	{
@@ -538,33 +540,37 @@ void SetupSurfaces(vm::ptr<CellGcmContextData>& cntxt)
 
 	GSRender& r = Emu.GetGSManager().GetRender();
 
-	r.m_surface_type = CELL_GCM_SURFACE_PITCH;
-	r.m_surface_antialias = CELL_GCM_SURFACE_CENTER_1;
-	r.m_surface_color_format = (u8)s_rescInternalInstance->m_pRescDsts->format;
-	r.m_surface_color_target = (!isMrt) ? CELL_GCM_SURFACE_TARGET_0 : CELL_GCM_SURFACE_TARGET_MRT1;
+	// FIXME: only RSX Thread can write rsx::method_registers
+	// Others threads must fill the command buffer or use another
+	// mechanism.
+
+//	r.m_surface_type = CELL_GCM_SURFACE_PITCH;
+//	r.m_surface_antialias = CELL_GCM_SURFACE_CENTER_1;
+//	r.m_surface_color_format = (u8)s_rescInternalInstance->m_pRescDsts->format;
+/*	rsx::method_registers[NV4097_SET_SURFACE_COLOR_TARGET] = (!isMrt) ? CELL_GCM_SURFACE_TARGET_0 : CELL_GCM_SURFACE_TARGET_MRT1;
 	//surface.colorLocation[0] = CELL_GCM_LOCATION_LOCAL;
-	r.m_surface_offset_a = dstOffset0;
-	r.m_surface_pitch_a = s_rescInternalInstance->m_dstPitch;
+	rsx::method_registers[NV4097_SET_SURFACE_COLOR_AOFFSET] = dstOffset0;
+	rsx::method_registers[NV4097_SET_SURFACE_PITCH_A] = s_rescInternalInstance->m_dstPitch;
 	//surface.colorLocation[1] = CELL_GCM_LOCATION_LOCAL;
-	r.m_surface_offset_b = (!isMrt) ? 0 : dstOffset1;
-	r.m_surface_pitch_b = (!isMrt) ? 64 : s_rescInternalInstance->m_dstPitch;
+	rsx::method_registers[NV4097_SET_SURFACE_COLOR_BOFFSET] = (!isMrt) ? 0 : dstOffset1;
+	rsx::method_registers[NV4097_SET_SURFACE_PITCH_B] = (!isMrt) ? 64 : s_rescInternalInstance->m_dstPitch;
 	//surface.colorLocation[2] = CELL_GCM_LOCATION_LOCAL;
-	r.m_surface_offset_c = 0;
-	r.m_surface_pitch_c = 64;
+	rsx::method_registers[NV4097_SET_SURFACE_COLOR_COFFSET] = 0;
+	rsx::method_registers[NV4097_SET_SURFACE_PITCH_C] = 64;
 	//surface.colorLocation[3] = CELL_GCM_LOCATION_LOCAL;
-	r.m_surface_offset_d = 0;
-	r.m_surface_pitch_d = 64;
-	r.m_surface_depth_format = CELL_GCM_SURFACE_Z24S8;
+	rsx::method_registers[NV4097_SET_SURFACE_COLOR_DOFFSET] = 0;
+	rsx::method_registers[NV4097_SET_SURFACE_PITCH_D] = 64;
+//	r.m_surface_depth_format = CELL_GCM_SURFACE_Z24S8;
 	//surface.depthLocation = CELL_GCM_LOCATION_LOCAL;
-	r.m_surface_offset_z = 0;
-	r.m_surface_pitch_z = 64;
-	r.m_surface_width = s_rescInternalInstance->m_dstWidth;
-	r.m_surface_height = s_rescInternalInstance->m_dstHeight;
-	r.m_surface_clip_x = 0;
-	r.m_surface_clip_y = 0;
+	rsx::method_registers[NV4097_SET_SURFACE_ZETA_OFFSET];
+	rsx::method_registers[NV4097_SET_SURFACE_PITCH_Z] = 64;
+//	r.m_surface_width = s_rescInternalInstance->m_dstWidth;
+//	r.m_surface_height = s_rescInternalInstance->m_dstHeight;
+//	r.m_surface_clip_x = 0;*/
+//	r.m_surface_clip_y = 0;
 }
 
-// Module Functions
+// Module<> Functions
 s32 cellRescInit(vm::ptr<CellRescInitConfig> initConfig)
 {
 	cellResc.Warning("cellRescInit(initConfig=*0x%x)", initConfig);
@@ -711,7 +717,7 @@ void SetFlipHandler(vm::ptr<void(u32)> handler)
 	}
 }
 
-s32 cellRescSetDisplayMode(PPUThread& CPU, u32 displayMode)
+s32 cellRescSetDisplayMode(u32 displayMode)
 {
 	cellResc.Warning("cellRescSetDisplayMode(displayMode=%d)", displayMode);
 
@@ -762,7 +768,7 @@ s32 cellRescSetDisplayMode(PPUThread& CPU, u32 displayMode)
 		else			  m_pCFragmentShader = m_pCFragmentShaderArray[RESC_SHADER_DEFAULT_BILINEAR];
 	}*/
 
-	vm::stackvar<CellVideoOutConfiguration> videocfg(CPU);
+	vm::var<CellVideoOutConfiguration> videocfg;
 	videocfg->resolutionId = RescBufferMode2SysutilResolutionId(s_rescInternalInstance->m_dstMode);
 	videocfg->format       = RescDstFormat2SysutilFormat(s_rescInternalInstance->m_pRescDsts->format );
 	videocfg->aspect       = CELL_VIDEO_OUT_ASPECT_AUTO;
@@ -980,7 +986,7 @@ s32 cellRescSetSrc(s32 idx, vm::ptr<CellRescSrc> src)
 	return 0;
 }
 
-s32 cellRescSetConvertAndFlip(PPUThread& CPU, vm::ptr<CellGcmContextData> cntxt, s32 idx)
+s32 cellRescSetConvertAndFlip(PPUThread& ppu, vm::ptr<CellGcmContextData> cntxt, s32 idx)
 {
 	cellResc.Log("cellRescSetConvertAndFlip(cntxt=*0x%x, idx=0x%x)", cntxt, idx);
 
@@ -1013,7 +1019,7 @@ s32 cellRescSetConvertAndFlip(PPUThread& CPU, vm::ptr<CellGcmContextData> cntxt,
 
 	//TODO: ?
 
-	cellGcmSetPrepareFlip(CPU, cntxt, idx);
+	cellGcmSetPrepareFlip(ppu, cntxt, idx);
 
 	return CELL_OK;
 }
@@ -1027,7 +1033,7 @@ s32 cellRescSetWaitFlip()
 	return CELL_OK;
 }
 
-s32 cellRescSetBufferAddress(PPUThread& CPU, vm::ptr<u32> colorBuffers, vm::ptr<u32> vertexArray, vm::ptr<u32> fragmentShader)
+s32 cellRescSetBufferAddress(vm::ptr<u32> colorBuffers, vm::ptr<u32> vertexArray, vm::ptr<u32> fragmentShader)
 {
 	cellResc.Warning("cellRescSetBufferAddress(colorBuffers=*0x%x, vertexArray=*0x%x, fragmentShader=*0x%x)", colorBuffers, vertexArray, fragmentShader);
 
@@ -1047,12 +1053,12 @@ s32 cellRescSetBufferAddress(PPUThread& CPU, vm::ptr<u32> colorBuffers, vm::ptr<
 	s_rescInternalInstance->m_vertexArrayEA   = vertexArray.addr();
 	s_rescInternalInstance->m_fragmentUcodeEA = fragmentShader.addr();
 
-	vm::stackvar<be_t<u32>> dstOffset(CPU);
+	vm::var<u32> dstOffset;
 	cellGcmAddressToOffset(s_rescInternalInstance->m_colorBuffersEA, dstOffset);
 
 	for (s32 i=0; i<GetNumColorBuffers(); i++)
 	{
-		s_rescInternalInstance->m_dstOffsets[i] = dstOffset.value() + i * s_rescInternalInstance->m_dstBufInterval;
+		s_rescInternalInstance->m_dstOffsets[i] = *dstOffset + i * s_rescInternalInstance->m_dstBufInterval;
 	}
 
 	for (s32 i=0; i<GetNumColorBuffers(); i++)
@@ -1075,21 +1081,21 @@ void cellRescSetFlipHandler(vm::ptr<void(u32)> handler)
 {
 	cellResc.Warning("cellRescSetFlipHandler(handler=*0x%x)", handler);
 
-	Emu.GetGSManager().GetRender().m_flip_handler = handler;
+	Emu.GetGSManager().GetRender().flip_handler = handler;
 }
 
 void cellRescResetFlipStatus()
 {
 	cellResc.Log("cellRescResetFlipStatus()");
 
-	Emu.GetGSManager().GetRender().m_flip_status = 1;
+	Emu.GetGSManager().GetRender().flip_status = 1;
 }
 
 s32 cellRescGetFlipStatus()
 {
 	cellResc.Log("cellRescGetFlipStatus()");
 
-	return Emu.GetGSManager().GetRender().m_flip_status;
+	return Emu.GetGSManager().GetRender().flip_status;
 }
 
 s32 cellRescGetRegisterCount()
@@ -1102,7 +1108,7 @@ u64 cellRescGetLastFlipTime()
 {
 	cellResc.Log("cellRescGetLastFlipTime()");
 
-	return Emu.GetGSManager().GetRender().m_last_flip_time;
+	return Emu.GetGSManager().GetRender().last_flip_time;
 }
 
 s32 cellRescSetRegisterCount()
@@ -1115,7 +1121,7 @@ void cellRescSetVBlankHandler(vm::ptr<void(u32)> handler)
 {
 	cellResc.Warning("cellRescSetVBlankHandler(handler=*0x%x)", handler);
 
-	Emu.GetGSManager().GetRender().m_vblank_handler = handler;
+	Emu.GetGSManager().GetRender().vblank_handler = handler;
 }
 
 u16 FloatToHalf(float val)
@@ -1214,19 +1220,19 @@ s32 cellRescCreateInterlaceTable(u32 ea_addr, float srcH, CellRescTableElement d
 
 	if (!s_rescInternalInstance->m_bInitialized)
 	{
-		cellResc.Error("cellRescCreateInterlaceTable : CELL_RESC_ERROR_NOT_INITIALIZED");
+		cellResc.Error("cellRescCreateInterlaceTable: CELL_RESC_ERROR_NOT_INITIALIZED");
 		return CELL_RESC_ERROR_NOT_INITIALIZED;
 	}
 
 	if ((ea_addr == 0) || (srcH <= 0.f) || (!(depth == CELL_RESC_ELEMENT_HALF || depth == CELL_RESC_ELEMENT_FLOAT)) || (length <= 0))
 	{
-		cellResc.Error("cellRescCreateInterlaceTable : CELL_RESC_ERROR_NOT_INITIALIZED");
+		cellResc.Error("cellRescCreateInterlaceTable: CELL_RESC_ERROR_BAD_ARGUMENT");
 		return CELL_RESC_ERROR_BAD_ARGUMENT;
 	}
 
 	if (s_rescInternalInstance->m_dstHeight == 0)
 	{
-		cellResc.Error("cellRescCreateInterlaceTable : CELL_RESC_ERROR_BAD_COMBINATION");
+		cellResc.Error("cellRescCreateInterlaceTable: CELL_RESC_ERROR_BAD_COMBINATION");
 		return CELL_RESC_ERROR_BAD_COMBINATION;
 	}
 
@@ -1247,7 +1253,7 @@ s32 cellRescCreateInterlaceTable(u32 ea_addr, float srcH, CellRescTableElement d
 }
 
 
-Module cellResc("cellResc", []()
+Module<> cellResc("cellResc", []()
 {
 	s_rescInternalInstance = new CCellRescInternal();
 

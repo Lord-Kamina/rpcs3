@@ -1,10 +1,10 @@
 #include "stdafx.h"
-#include "Utilities/Log.h"
 #include "Emu/Memory/Memory.h"
 #include "Emu/System.h"
 #include "GLFragmentProgram.h"
 
 #include "GLCommonDecompiler.h"
+#include "../GCM.h"
 
 std::string GLFragmentDecompilerThread::getFloatTypeName(size_t elementCount)
 {
@@ -33,9 +33,9 @@ void GLFragmentDecompilerThread::insertHeader(std::stringstream & OS)
 
 void GLFragmentDecompilerThread::insertIntputs(std::stringstream & OS)
 {
-	for (ParamType PT : m_parr.params[PF_PARAM_IN])
+	for (const ParamType& PT : m_parr.params[PF_PARAM_IN])
 	{
-		for (ParamItem PI : PT.items)
+		for (const ParamItem& PI : PT.items)
 			OS << "in " << PT.type << " " << PI.name << ";" << std::endl;
 	}
 }
@@ -44,10 +44,10 @@ void GLFragmentDecompilerThread::insertOutputs(std::stringstream & OS)
 {
 	const std::pair<std::string, std::string> table[] =
 	{
-		{ "ocol0", m_ctrl & 0x40 ? "r0" : "h0" },
-		{ "ocol1", m_ctrl & 0x40 ? "r2" : "h4" },
-		{ "ocol2", m_ctrl & 0x40 ? "r3" : "h6" },
-		{ "ocol3", m_ctrl & 0x40 ? "r4" : "h8" },
+		{ "ocol0", m_ctrl & CELL_GCM_SHADER_CONTROL_32_BITS_EXPORTS ? "r0" : "h0" },
+		{ "ocol1", m_ctrl & CELL_GCM_SHADER_CONTROL_32_BITS_EXPORTS ? "r2" : "h4" },
+		{ "ocol2", m_ctrl & CELL_GCM_SHADER_CONTROL_32_BITS_EXPORTS ? "r3" : "h6" },
+		{ "ocol3", m_ctrl & CELL_GCM_SHADER_CONTROL_32_BITS_EXPORTS ? "r4" : "h8" },
 	};
 
 	for (int i = 0; i < sizeof(table) / sizeof(*table); ++i)
@@ -59,32 +59,54 @@ void GLFragmentDecompilerThread::insertOutputs(std::stringstream & OS)
 
 void GLFragmentDecompilerThread::insertConstants(std::stringstream & OS)
 {
-	for (ParamType PT : m_parr.params[PF_PARAM_UNIFORM])
+	for (const ParamType& PT : m_parr.params[PF_PARAM_UNIFORM])
 	{
 		if (PT.type != "sampler2D")
 			continue;
-		for (ParamItem PI : PT.items)
+		for (const ParamItem& PI : PT.items)
 			OS << "uniform " << PT.type << " " << PI.name << ";" << std::endl;
 
 	}
 
-	for (ParamType PT : m_parr.params[PF_PARAM_UNIFORM])
+	OS << "layout(std140, binding = 2) uniform FragmentConstantsBuffer" << std::endl;
+	OS << "{" << std::endl;
+	for (const ParamType& PT : m_parr.params[PF_PARAM_UNIFORM])
 	{
 		if (PT.type == "sampler2D")
 			continue;
-		for (ParamItem PI : PT.items)
-			OS << "uniform " << PT.type << " " << PI.name << ";" << std::endl;
+		for (const ParamItem& PI : PT.items)
+			OS << "	 " << PT.type << " " << PI.name << ";" << std::endl;
 	}
+	// A dummy value otherwise it's invalid to create an empty uniform buffer
+	OS << "	vec4 void_value;" << std::endl;
+	OS << "};" << std::endl;
 }
 
 void GLFragmentDecompilerThread::insertMainStart(std::stringstream & OS)
 {
+	// "lib" function
+	// 0.00001 is used as "some non zero very little number"
+	OS << "vec4 divsq_legacy(vec4 num, vec4 denum)\n";
+	OS << "{\n";
+	OS << "	return num / sqrt(max(denum.xxxx, 0.00001));\n";
+	OS << "}\n";
+
+	OS << "vec4 rcp_legacy(vec4 denum)\n";
+	OS << "{\n";
+	OS << "	return 1. / denum;\n";
+	OS << "}\n";
+
+	OS << "vec4 rsq_legacy(vec4 denum)\n";
+	OS << "{\n";
+	OS << "	return 1. / sqrt(max(denum, 0.00001));\n";
+	OS << "}\n";
+
 	OS << "void main ()" << std::endl;
 	OS << "{" << std::endl;
 
-	for (ParamType PT : m_parr.params[PF_PARAM_NONE])
+	for (const ParamType& PT : m_parr.params[PF_PARAM_NONE])
 	{
-		for (ParamItem PI : PT.items)
+		for (const ParamItem& PI : PT.items)
 		{
 			OS << "	" << PT.type << " " << PI.name;
 			if (!PI.value.empty())
@@ -98,10 +120,10 @@ void GLFragmentDecompilerThread::insertMainEnd(std::stringstream & OS)
 {
 	const std::pair<std::string, std::string> table[] =
 	{
-		{ "ocol0", m_ctrl & 0x40 ? "r0" : "h0" },
-		{ "ocol1", m_ctrl & 0x40 ? "r2" : "h4" },
-		{ "ocol2", m_ctrl & 0x40 ? "r3" : "h6" },
-		{ "ocol3", m_ctrl & 0x40 ? "r4" : "h8" },
+		{ "ocol0", m_ctrl & CELL_GCM_SHADER_CONTROL_32_BITS_EXPORTS ? "r0" : "h0" },
+		{ "ocol1", m_ctrl & CELL_GCM_SHADER_CONTROL_32_BITS_EXPORTS ? "r2" : "h4" },
+		{ "ocol2", m_ctrl & CELL_GCM_SHADER_CONTROL_32_BITS_EXPORTS ? "r3" : "h6" },
+		{ "ocol3", m_ctrl & CELL_GCM_SHADER_CONTROL_32_BITS_EXPORTS ? "r4" : "h8" },
 	};
 
 	for (int i = 0; i < sizeof(table) / sizeof(*table); ++i)
@@ -110,7 +132,10 @@ void GLFragmentDecompilerThread::insertMainEnd(std::stringstream & OS)
 			OS << "	" << table[i].first << " = " << table[i].second << ";" << std::endl;
 	}
 
-	OS << "};" << std::endl;
+	if (m_ctrl & CELL_GCM_SHADER_CONTROL_DEPTH_EXPORT)
+		OS << ((m_ctrl & CELL_GCM_SHADER_CONTROL_32_BITS_EXPORTS) ? "\tgl_FragDepth = r1.z;\n" : "\tgl_FragDepth = h0.z;\n") << std::endl;
+
+	OS << "}" << std::endl;
 }
 
 void GLFragmentDecompilerThread::Task()
@@ -147,13 +172,13 @@ GLFragmentProgram::~GLFragmentProgram()
 //	}
 //}
 
-void GLFragmentProgram::Decompile(RSXFragmentProgram& prog)
+void GLFragmentProgram::Decompile(RSXFragmentProgram& prog, const std::vector<texture_dimension> &td)
 {
-	GLFragmentDecompilerThread decompiler(shader, parr, prog.addr, prog.size, prog.ctrl);
+	GLFragmentDecompilerThread decompiler(shader, parr, prog.addr, prog.size, prog.ctrl, td);
 	decompiler.Task();
 	for (const ParamType& PT : decompiler.m_parr.params[PF_PARAM_UNIFORM])
 	{
-		for (const ParamItem PI : PT.items)
+		for (const ParamItem& PI : PT.items)
 		{
 			if (PT.type == "sampler2D")
 				continue;

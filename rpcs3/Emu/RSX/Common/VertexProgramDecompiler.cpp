@@ -1,5 +1,4 @@
 #include "stdafx.h"
-#include "Utilities/Log.h"
 #include "Emu/System.h"
 
 #include "VertexProgramDecompiler.h"
@@ -48,7 +47,7 @@ std::string VertexProgramDecompiler::GetDST(bool isSca)
 
 	default:
 		if (d3.dst > 15)
-			LOG_ERROR(RSX, fmt::Format("dst index out of range: %u", d3.dst));
+			LOG_ERROR(RSX, fmt::format("dst index out of range: %u", d3.dst));
 		ret += m_parr.AddParam(PF_PARAM_NONE, getFloatTypeName(4), std::string("dst_reg") + std::to_string(d3.dst), d3.dst == 0 ? getFloatTypeName(4) + "(0.0f, 0.0f, 0.0f, 1.0f)" : getFloatTypeName(4) + "(0.0, 0.0, 0.0, 0.0)");
 		break;
 	}
@@ -82,7 +81,7 @@ std::string VertexProgramDecompiler::GetSRC(const u32 n)
 		}
 		else
 		{
-			LOG_ERROR(RSX, "Bad input src num: %d", fmt::by_value(d1.input_src));
+			LOG_ERROR(RSX, "Bad input src num: %d", u32{ d1.input_src });
 			ret += m_parr.AddParam(PF_PARAM_IN, getFloatTypeName(4), "in_unk", d1.input_src);
 		}
 		break;
@@ -92,7 +91,7 @@ std::string VertexProgramDecompiler::GetSRC(const u32 n)
 		break;
 
 	default:
-		LOG_ERROR(RSX, fmt::Format("Bad src%u reg type: %d", n, fmt::by_value(src[n].reg_type)));
+		LOG_ERROR(RSX, fmt::format("Bad src%u reg type: %d", n, u32{ src[n].reg_type }));
 		Emu.Pause();
 		break;
 	}
@@ -108,7 +107,7 @@ std::string VertexProgramDecompiler::GetSRC(const u32 n)
 
 	if (swizzle != f) ret += '.' + swizzle;
 
-	bool abs;
+	bool abs = false;
 
 	switch (n)
 	{
@@ -136,12 +135,12 @@ void VertexProgramDecompiler::SetDST(bool is_sca, std::string value)
 
 	std::string mask = GetMask(is_sca);
 
-	value += mask;
-
-	if (is_sca && d0.vec_result)
+	if (is_sca)
 	{
-		//value = "vec4(" + value + ")";
+		value = getFloatTypeName(4) + "(" + value + ")";
 	}
+
+	value += mask;
 
 	if (d0.staturate)
 	{
@@ -200,6 +199,7 @@ std::string VertexProgramDecompiler::Format(const std::string& code)
 		{ "$1", std::bind(std::mem_fn(&VertexProgramDecompiler::GetSRC), this, 1) },
 		{ "$2", std::bind(std::mem_fn(&VertexProgramDecompiler::GetSRC), this, 2) },
 		{ "$s", std::bind(std::mem_fn(&VertexProgramDecompiler::GetSRC), this, 2) },
+		{ "$awm", std::bind(std::mem_fn(&VertexProgramDecompiler::AddAddrRegWithoutMask), this) },
 		{ "$am", std::bind(std::mem_fn(&VertexProgramDecompiler::AddAddrMask), this) },
 		{ "$a", std::bind(std::mem_fn(&VertexProgramDecompiler::AddAddrReg), this) },
 
@@ -232,16 +232,15 @@ std::string VertexProgramDecompiler::GetCond()
 	if (d0.cond == 0) return "false";
 	if (d0.cond == (lt | gt | eq)) return "true";
 
-	static const char* cond_string_table[(lt | gt | eq) + 1] =
+	static const COMPARE cond_string_table[(lt | gt | eq) + 1] =
 	{
-		"error",
-		"lessThan",
-		"equal",
-		"lessThanEqual",
-		"greaterThan",
-		"notEqual",
-		"greaterThanEqual",
-		"error"
+		COMPARE::FUNCTION_SLT, // "error"
+		COMPARE::FUNCTION_SLT,
+		COMPARE::FUNCTION_SEQ,
+		COMPARE::FUNCTION_SLE,
+		COMPARE::FUNCTION_SGT,
+		COMPARE::FUNCTION_SNE,
+		COMPARE::FUNCTION_SGE,
 	};
 
 	static const char f[4] = { 'x', 'y', 'z', 'w' };
@@ -253,8 +252,7 @@ std::string VertexProgramDecompiler::GetCond()
 	swizzle += f[d0.mask_w];
 
 	swizzle = swizzle == "xyzw" ? "" : "." + swizzle;
-
-	return fmt::Format("any(%s(cc%d%s, vec4(0.0)%s))", cond_string_table[d0.cond], d0.cond_reg_sel_1, swizzle.c_str(), swizzle.c_str());
+	return "any(" + compareFunction(cond_string_table[d0.cond], "cc" + std::to_string(d0.cond_reg_sel_1) + swizzle, getFloatTypeName(4) + "(0., 0., 0., 0.)" + swizzle) + ")";
 }
 
 void VertexProgramDecompiler::AddCodeCond(const std::string& dst, const std::string& src)
@@ -309,7 +307,7 @@ void VertexProgramDecompiler::AddCodeCond(const std::string& dst, const std::str
 
 	if (dst_var.swizzles[0].length() == 1)
 	{
-		AddCode("if (" + cond + ".x) " + dst + " = " + getFloatTypeName(4) + "(" + src + ".xxxx).x;");
+		AddCode("if (" + cond + ".x) " + dst + " = " + src + ";");
 	}
 	else
 	{
@@ -330,7 +328,12 @@ std::string VertexProgramDecompiler::AddAddrMask()
 std::string VertexProgramDecompiler::AddAddrReg()
 {
 	static const char f[] = { 'x', 'y', 'z', 'w' };
-	return m_parr.AddParam(PF_PARAM_NONE, "ivec4", "a" + std::to_string(d0.addr_reg_sel_1), "ivec4(0)") + AddAddrMask();
+	return m_parr.AddParam(PF_PARAM_NONE, getIntTypeName(4), "a" + std::to_string(d0.addr_reg_sel_1), getIntTypeName(4) + "(0, 0, 0, 0)") + AddAddrMask();
+}
+
+std::string VertexProgramDecompiler::AddAddrRegWithoutMask()
+{
+	return m_parr.AddParam(PF_PARAM_NONE, getIntTypeName(4), "a" + std::to_string(d0.addr_reg_sel_1), getIntTypeName(4) + "(0, 0, 0, 0)");
 }
 
 u32 VertexProgramDecompiler::GetAddr()
@@ -517,7 +520,7 @@ std::string VertexProgramDecompiler::Decompile()
 		AddCode("{");
 		m_cur_instr->open_scopes++;
 
-		AddCode(fmt::Format("if (jump_position <= %u)", jump_position++));
+		AddCode(fmt::format("if (jump_position <= %u)", jump_position++));
 		AddCode("{");
 		m_cur_instr->open_scopes++;
 	}
@@ -543,7 +546,7 @@ std::string VertexProgramDecompiler::Decompile()
 			AddCode("}");
 			AddCode("");
 
-			AddCode(fmt::Format("if (jump_position <= %u)", jump_position++));
+			AddCode(fmt::format("if (jump_position <= %u)", jump_position++));
 			AddCode("{");
 			m_cur_instr->open_scopes++;
 		}
@@ -559,7 +562,7 @@ std::string VertexProgramDecompiler::Decompile()
 		case RSX_SCA_OPCODE_MOV: SetDSTSca("$s"); break;
 		case RSX_SCA_OPCODE_RCP: SetDSTSca("(1.0 / $s)"); break;
 		case RSX_SCA_OPCODE_RCC: SetDSTSca("clamp(1.0 / $s, 5.42101e-20, 1.884467e19)"); break;
-		case RSX_SCA_OPCODE_RSQ: SetDSTSca("1.f / sqrt($s)"); break;
+		case RSX_SCA_OPCODE_RSQ: SetDSTSca("(1.f / sqrt($s))"); break;
 		case RSX_SCA_OPCODE_EXP: SetDSTSca("exp($s)"); break;
 		case RSX_SCA_OPCODE_LOG: SetDSTSca("log($s)"); break;
 		case RSX_SCA_OPCODE_LIT: SetDSTSca(getFloatTypeName(4) + "(1.0, $s.x, ($s.x > 0.0 ? exp($s.w * log2($s.y)) : 0.0), 1.0)"); break;
@@ -574,39 +577,36 @@ std::string VertexProgramDecompiler::Decompile()
 			AddCode("}");
 		}
 		break;
-		/* This triggers opengl driver lost connection error code 7
 		case RSX_SCA_OPCODE_BRI: // works differently (BRI o[1].x(TR) L0;)
 		{
-		uint jump_position;
+			u32 jump_position = 1;
 
-		if (is_has_BRA)
-		{
-		jump_position = GetAddr();
+			if (is_has_BRA)
+			{
+				jump_position = GetAddr();
+			}
+			else
+			{
+				u32 addr = GetAddr();
+
+				for (auto pos : m_jump_lvls)
+				{
+					if (addr == pos)
+						break;
+
+					++jump_position;
+				}
+			}
+
+			AddCode("$ifcond ");
+			AddCode("{");
+			m_cur_instr->open_scopes++;
+			AddCode(fmt::format("jump_position = %u;", jump_position));
+			AddCode("continue;");
+			m_cur_instr->close_scopes++;
+			AddCode("}");
 		}
-		else
-		{
-		int addr = GetAddr();
-
-		jump_position = 0;
-		for (auto pos : m_jump_lvls)
-		{
-		if (addr == pos)
 		break;
-
-		++jump_position;
-		}
-		}
-
-		AddCode("$ifcond ");
-		AddCode("{");
-		m_cur_instr->open_scopes++;
-		AddCode(fmt::Format("jump_position = %u;", jump_position));
-		AddCode("continue;");
-		m_cur_instr->close_scopes++;
-		AddCode("}");
-		}
-		break;
-		*/
 		case RSX_SCA_OPCODE_CAL:
 			// works same as BRI
 			AddCode("$ifcond $f(); //CAL");
@@ -641,8 +641,8 @@ std::string VertexProgramDecompiler::Decompile()
 			break;
 
 		default:
-			AddCode(fmt::Format("//Unknown vp sca_opcode 0x%x", fmt::by_value(d1.sca_opcode)));
-			LOG_ERROR(RSX, "Unknown vp sca_opcode 0x%x", fmt::by_value(d1.sca_opcode));
+			AddCode(fmt::format("//Unknown vp sca_opcode 0x%x", u32{ d1.sca_opcode }));
+			LOG_ERROR(RSX, "Unknown vp sca_opcode 0x%x", u32{ d1.sca_opcode });
 			Emu.Pause();
 			break;
 		}
@@ -662,7 +662,8 @@ std::string VertexProgramDecompiler::Decompile()
 		case RSX_VEC_OPCODE_MAX: SetDSTVec("max($0, $1)"); break;
 		case RSX_VEC_OPCODE_SLT: SetDSTVec(getFloatTypeName(4) + "(" + compareFunction(COMPARE::FUNCTION_SLT, "$0", "$1") + ")"); break;
 		case RSX_VEC_OPCODE_SGE: SetDSTVec(getFloatTypeName(4) + "(" + compareFunction(COMPARE::FUNCTION_SGE, "$0", "$1") + ")"); break;
-		case RSX_VEC_OPCODE_ARL: AddCode("$ifcond $a = ivec4($0)$am;");  break;
+			// Note: It looks like ARL opcode ignore input/output swizzle mask (SH3)
+		case RSX_VEC_OPCODE_ARL: AddCode("$ifcond $awm = " + getIntTypeName(4) + "($0);");  break;
 		case RSX_VEC_OPCODE_FRC: SetDSTVec(getFunction(FUNCTION::FUNCTION_FRACT)); break;
 		case RSX_VEC_OPCODE_FLR: SetDSTVec("floor($0)"); break;
 		case RSX_VEC_OPCODE_SEQ: SetDSTVec(getFloatTypeName(4) + "(" + compareFunction(COMPARE::FUNCTION_SEQ, "$0", "$1") + ")"); break;
@@ -675,8 +676,8 @@ std::string VertexProgramDecompiler::Decompile()
 		case RSX_VEC_OPCODE_TXL: SetDSTVec("texture($t, $0.xy)"); break;
 
 		default:
-			AddCode(fmt::Format("//Unknown vp opcode 0x%x", fmt::by_value(d1.vec_opcode)));
-			LOG_ERROR(RSX, "Unknown vp opcode 0x%x", fmt::by_value(d1.vec_opcode));
+			AddCode(fmt::format("//Unknown vp opcode 0x%x", u32{ d1.vec_opcode }));
+			LOG_ERROR(RSX, "Unknown vp opcode 0x%x", u32{ d1.vec_opcode });
 			Emu.Pause();
 			break;
 		}

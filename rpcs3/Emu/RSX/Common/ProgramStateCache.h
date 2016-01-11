@@ -2,7 +2,6 @@
 
 #include "Emu/RSX/RSXFragmentProgram.h"
 #include "Emu/RSX/RSXVertexProgram.h"
-#include "Utilities/Log.h"
 
 
 enum class SHADER_TYPE
@@ -74,26 +73,6 @@ namespace ProgramHashUtil
 			return ((sourceOperand >> 8) & 0x3) == 2;
 		}
 
-		/**
-		* RSX fragment program constants are inlined inside shader code.
-		* This function takes an instruction from a fragment program and
-		* returns an equivalent instruction where inlined constants
-		* are masked.
-		* This allows to hash/compare fragment programs even if their
-		* inlined constants are modified inbetween
-		*/
-		static qword fragmentMaskConstant(const qword &initialQword)
-		{
-			qword result = initialQword;
-			if (isConstant(initialQword.word[1]))
-				result.word[1] = 0;
-			if (isConstant(initialQword.word[2]))
-				result.word[2] = 0;
-			if (isConstant(initialQword.word[3]))
-				result.word[3] = 0;
-			return result;
-		}
-
 		static
 		size_t getFPBinarySize(void *ptr)
 		{
@@ -132,13 +111,9 @@ namespace ProgramHashUtil
 			while (true)
 			{
 				const qword& inst = instbuffer[instIndex];
-				bool end = (inst.word[0] >> 8) & 0x1;
-				if (end)
-					return hash;
-				const qword& maskedInst = FragmentProgramUtil::fragmentMaskConstant(inst);
-				hash ^= maskedInst.dword[0];
+				hash ^= inst.dword[0];
 				hash += (hash << 1) + (hash << 4) + (hash << 5) + (hash << 7) + (hash << 8) + (hash << 40);
-				hash ^= maskedInst.dword[1];
+				hash ^= inst.dword[1];
 				hash += (hash << 1) + (hash << 4) + (hash << 5) + (hash << 7) + (hash << 8) + (hash << 40);
 				instIndex++;
 				// Skip constants
@@ -146,6 +121,10 @@ namespace ProgramHashUtil
 					FragmentProgramUtil::isConstant(inst.word[2]) ||
 					FragmentProgramUtil::isConstant(inst.word[3]))
 					instIndex++;
+
+				bool end = (inst.word[0] >> 8) & 0x1;
+				if (end)
+					return hash;
 			}
 			return 0;
 		}
@@ -162,14 +141,8 @@ namespace ProgramHashUtil
 			{
 				const qword& inst1 = instBuffer1[instIndex];
 				const qword& inst2 = instBuffer2[instIndex];
-				bool end = ((inst1.word[0] >> 8) & 0x1) && ((inst2.word[0] >> 8) & 0x1);
-				if (end)
-					return true;
 
-				const qword& maskedInst1 = FragmentProgramUtil::fragmentMaskConstant(inst1);
-				const qword& maskedInst2 = FragmentProgramUtil::fragmentMaskConstant(inst2);
-
-				if (maskedInst1.dword[0] != maskedInst2.dword[0] || maskedInst1.dword[1] != maskedInst2.dword[1])
+				if (inst1.dword[0] != inst2.dword[0] || inst1.dword[1] != inst2.dword[1])
 					return false;
 				instIndex++;
 				// Skip constants
@@ -177,6 +150,10 @@ namespace ProgramHashUtil
 					FragmentProgramUtil::isConstant(inst1.word[2]) ||
 					FragmentProgramUtil::isConstant(inst1.word[3]))
 					instIndex++;
+
+				bool end = ((inst1.word[0] >> 8) & 0x1) && ((inst2.word[0] >> 8) & 0x1);
+				if (end)
+					return true;
 			}
 		}
 	};
@@ -223,6 +200,8 @@ private:
 		{
 			size_t hashValue = 0;
 			hashValue ^= std::hash<unsigned>()(key.vpIdx);
+			hashValue ^= std::hash<unsigned>()(key.fpIdx);
+			hashValue ^= std::hash<typename BackendTraits::PipelineProperties>()(key.properties);
 			return hashValue;
 		}
 	};
@@ -239,7 +218,7 @@ private:
 
 	typename BackendTraits::FragmentProgramData& SearchFp(RSXFragmentProgram* rsx_fp, bool& found)
 	{
-		typename binary2FS::iterator It = m_cacheFS.find(vm::get_ptr<void>(rsx_fp->addr));
+		typename binary2FS::iterator It = m_cacheFS.find(vm::base(rsx_fp->addr));
 		if (It != m_cacheFS.end())
 		{
 			found = true;
@@ -247,9 +226,9 @@ private:
 		}
 		found = false;
 		LOG_WARNING(RSX, "FP not found in buffer!");
-		size_t actualFPSize = ProgramHashUtil::FragmentProgramUtil::getFPBinarySize(vm::get_ptr<u8>(rsx_fp->addr));
+		size_t actualFPSize = ProgramHashUtil::FragmentProgramUtil::getFPBinarySize(vm::base(rsx_fp->addr));
 		void *fpShadowCopy = malloc(actualFPSize);
-		memcpy(fpShadowCopy, vm::get_ptr<u8>(rsx_fp->addr), actualFPSize);
+		std::memcpy(fpShadowCopy, vm::base(rsx_fp->addr), actualFPSize);
 		typename BackendTraits::FragmentProgramData &newShader = m_cacheFS[fpShadowCopy];
 		BackendTraits::RecompileFragmentProgram(rsx_fp, newShader, m_currentShaderId++);
 
@@ -289,10 +268,35 @@ public:
 	ProgramStateCache() : m_currentShaderId(0) {}
 	~ProgramStateCache()
 	{
+		clear();
+	}
+
+	const typename BackendTraits::VertexProgramData* get_transform_program(const RSXVertexProgram& rsx_vp) const
+	{
+		typename binary2VS::const_iterator It = m_cacheVS.find(rsx_vp.data);
+		if (It == m_cacheVS.end())
+			return nullptr;
+		return &It->second;
+	}
+
+	const typename BackendTraits::FragmentProgramData* get_shader_program(const RSXFragmentProgram& rsx_fp) const
+	{
+		typename binary2FS::const_iterator It = m_cacheFS.find(vm::base(rsx_fp.addr));
+		if (It == m_cacheFS.end())
+			return nullptr;
+		return &It->second;
+	}
+
+	void clear()
+	{
 		for (auto pair : m_cachePSO)
 			BackendTraits::DeleteProgram(pair.second);
+		m_cachePSO.clear();
+
 		for (auto pair : m_cacheFS)
 			free(pair.first);
+
+		m_cacheFS.clear();
 	}
 
 	typename BackendTraits::PipelineData *getGraphicPipelineState(
@@ -326,12 +330,33 @@ public:
 		return result;
 	}
 
-	const std::vector<size_t> &getFragmentConstantOffsetsCache(const RSXFragmentProgram *fragmentShader) const
+	size_t get_fragment_constants_buffer_size(const RSXFragmentProgram *fragmentShader) const
 	{
-		typename binary2FS::const_iterator It = m_cacheFS.find(vm::get_ptr<void>(fragmentShader->addr));
+		typename binary2FS::const_iterator It = m_cacheFS.find(vm::base(fragmentShader->addr));
 		if (It != m_cacheFS.end())
-			return It->second.FragmentConstantOffsetCache;
+			return It->second.FragmentConstantOffsetCache.size() * 4 * sizeof(float);
 		LOG_ERROR(RSX, "Can't retrieve constant offset cache");
-		return dummyFragmentConstantCache;
+		return 0;
+	}
+
+	void fill_fragment_constans_buffer(void *buffer, const RSXFragmentProgram *fragment_program) const
+	{
+		typename binary2FS::const_iterator It = m_cacheFS.find(vm::base(fragment_program->addr));
+		if (It == m_cacheFS.end())
+			return;
+		__m128i mask = _mm_set_epi8(0xE, 0xF, 0xC, 0xD,
+			0xA, 0xB, 0x8, 0x9,
+			0x6, 0x7, 0x4, 0x5,
+			0x2, 0x3, 0x0, 0x1);
+
+		size_t offset = 0;
+		for (size_t offset_in_fragment_program : It->second.FragmentConstantOffsetCache)
+		{
+			void *data = vm::base(fragment_program->addr + (u32)offset_in_fragment_program);
+			const __m128i &vector = _mm_loadu_si128((__m128i*)data);
+			const __m128i &shuffled_vector = _mm_shuffle_epi8(vector, mask);
+			_mm_stream_si128((__m128i*)((char*)buffer + offset), shuffled_vector);
+			offset += 4 * sizeof(u32);
+		}
 	}
 };

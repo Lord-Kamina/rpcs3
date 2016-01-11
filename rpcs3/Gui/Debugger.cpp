@@ -1,3 +1,4 @@
+#include "stdafx.h"
 #include "stdafx_gui.h"
 #include <wx/statline.h>
 
@@ -9,12 +10,14 @@
 #include "Emu/CPU/CPUThreadManager.h"
 #include "Emu/CPU/CPUThread.h"
 
+extern bool user_asked_for_frame_capture;
 
 class DbgEmuPanel : public wxPanel
 {
 	wxButton* m_btn_run;
 	wxButton* m_btn_stop;
 	wxButton* m_btn_restart;
+	wxButton* m_btn_capture_frame;
 
 public:
 	DbgEmuPanel(wxWindow* parent) : wxPanel(parent)
@@ -28,11 +31,15 @@ public:
 		m_btn_restart = new wxButton(this, wxID_ANY, "Restart");
 		m_btn_restart->Bind(wxEVT_BUTTON, &DbgEmuPanel::OnRestart, this);
 
+		m_btn_capture_frame = new wxButton(this, wxID_ANY, "Capture frame");
+		m_btn_capture_frame->Bind(wxEVT_BUTTON, &DbgEmuPanel::OnCaptureFrame, this);
+
 		wxBoxSizer* s_b_main = new wxBoxSizer(wxHORIZONTAL);
 		s_b_main->Add(m_btn_run,     wxSizerFlags().Border(wxALL, 5));
 		s_b_main->Add(m_btn_stop,    wxSizerFlags().Border(wxALL, 5));
 		s_b_main->Add(new wxStaticLine(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLI_VERTICAL), 0, wxEXPAND);
 		s_b_main->Add(m_btn_restart, wxSizerFlags().Border(wxALL, 5));
+		s_b_main->Add(m_btn_capture_frame, wxSizerFlags().Border(wxALL, 5));
 
 		SetSizerAndFit(s_b_main);
 		Layout();
@@ -45,7 +52,7 @@ public:
 	{
 		m_btn_run->Enable(!Emu.IsStopped());
 		m_btn_stop->Enable(!Emu.IsStopped());
-		m_btn_restart->Enable(!Emu.m_path.empty());
+		m_btn_restart->Enable(!Emu.GetPath().empty());
 	}
 
 	void OnRun(wxCommandEvent& event)
@@ -73,6 +80,11 @@ public:
 	{
 		Emu.Stop();
 		Emu.Load();
+	}
+
+	void OnCaptureFrame(wxCommandEvent& event)
+	{
+		user_asked_for_frame_capture = true;
 	}
 
 	void HandleCommand(wxCommandEvent& event)

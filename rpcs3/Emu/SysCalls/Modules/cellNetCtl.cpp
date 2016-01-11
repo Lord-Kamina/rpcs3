@@ -1,10 +1,9 @@
 #include "stdafx.h"
 #include "Emu/Memory/Memory.h"
 #include "Emu/System.h"
+#include "Emu/state.h"
 #include "Emu/SysCalls/Modules.h"
-#include "Utilities/Log.h"
 
-#include "rpcs3/Ini.h"
 #include "cellSysutil.h"
 #include "cellNetCtl.h"
 
@@ -28,7 +27,7 @@
 #include <fcntl.h>
 #endif
 
-extern Module cellNetCtl;
+extern Module<> cellNetCtl;
 
 s32 cellNetCtlInit()
 {
@@ -48,21 +47,14 @@ s32 cellNetCtlGetState(vm::ptr<u32> state)
 {
 	cellNetCtl.Log("cellNetCtlGetState(state=*0x%x)", state);
 
-	if (Ini.NETStatus.GetValue() == 0)
+	switch (rpcs3::config.misc.net.status.value())
 	{
-		*state = CELL_NET_CTL_STATE_IPObtained;
-	}
-	else if (Ini.NETStatus.GetValue() == 1)
-	{
-		*state = CELL_NET_CTL_STATE_IPObtaining;
-	}
-	else if (Ini.NETStatus.GetValue() == 2)
-	{
-		*state = CELL_NET_CTL_STATE_Connecting;
-	}
-	else
-	{
-		*state = CELL_NET_CTL_STATE_Disconnected;
+	case misc_net_status::ip_obtained: *state = CELL_NET_CTL_STATE_IPObtained; break;
+	case misc_net_status::obtaining_ip: *state = CELL_NET_CTL_STATE_IPObtaining; break;
+	case misc_net_status::connecting: *state = CELL_NET_CTL_STATE_Connecting; break;
+	case misc_net_status::disconnected: *state = CELL_NET_CTL_STATE_Disconnected; break;
+
+	default: *state = CELL_NET_CTL_STATE_Disconnected; break;
 	}
 
 	return CELL_OK;
@@ -114,7 +106,7 @@ s32 cellNetCtlGetInfo(s32 code, vm::ptr<CellNetCtlInfo> info)
 		{
 			PIP_ADAPTER_ADDRESSES pCurrAddresses = pAddresses;
 
-			for (int c = 0; c < Ini.NETInterface.GetValue(); c++)
+			for (int c = 0; c < rpcs3::config.misc.net._interface.value(); c++)
 			{
 				pCurrAddresses = pCurrAddresses->Next;
 			}
@@ -130,7 +122,7 @@ s32 cellNetCtlGetInfo(s32 code, vm::ptr<CellNetCtlInfo> info)
 		free(pAddresses);
 #else
 		struct ifaddrs *ifaddr, *ifa;
-		int family, n;
+		s32 family, n;
 
 		if (getifaddrs(&ifaddr) == -1)
 		{
@@ -144,7 +136,7 @@ s32 cellNetCtlGetInfo(s32 code, vm::ptr<CellNetCtlInfo> info)
 				continue;
 			}
 
-			if (n < Ini.NETInterface.GetValue())
+			if (n < rpcs3::config.misc.net._interface.value())
 			{
 				continue;
 			}
@@ -153,9 +145,7 @@ s32 cellNetCtlGetInfo(s32 code, vm::ptr<CellNetCtlInfo> info)
 
 			if (family == AF_INET)
 			{
-				s32 fd, status;
-
-				fd = open("/proc/net/dev", O_RDONLY);
+				u32 fd = open("/proc/net/dev", O_RDONLY);
 				struct ifreq freq;
 
 				if (ioctl(fd, SIOCGIFMTU, &freq) == -1)
@@ -174,18 +164,32 @@ s32 cellNetCtlGetInfo(s32 code, vm::ptr<CellNetCtlInfo> info)
 		freeifaddrs(ifaddr);
 #endif
 	}
+	else if (code == CELL_NET_CTL_INFO_LINK)
+	{
+		if (rpcs3::config.misc.net.status.value() == misc_net_status::ip_obtained)
+		{
+			info->link = CELL_NET_CTL_LINK_CONNECTED;
+		}
+		else
+		{
+			info->link = CELL_NET_CTL_LINK_DISCONNECTED;
+		}
+	}
 	else if (code == CELL_NET_CTL_INFO_IP_ADDRESS)
 	{
+		// 0.0.0.0 seems to be the default address when no ethernet cables are connected to the PS3
+		strcpy_trunc(info->ip_address, "0.0.0.0");
+
 #ifdef _WIN32
-		ULONG bufLen = sizeof(IP_ADAPTER_INFO) + 1;
-		PIP_ADAPTER_INFO pAdapterInfo = (PIP_ADAPTER_INFO)malloc(bufLen);
+		ULONG bufLen = sizeof(IP_ADAPTER_INFO);
+		PIP_ADAPTER_INFO pAdapterInfo = (IP_ADAPTER_INFO*)malloc(bufLen);
 		DWORD ret;
 
 		ret = GetAdaptersInfo(pAdapterInfo, &bufLen);
 		
 		if (ret == ERROR_BUFFER_OVERFLOW)
 		{
-			cellNetCtl.Error("cellNetCtlGetInfo(IP_ADDRESS): GetAdaptersAddresses buffer overflow.");
+			cellNetCtl.Error("cellNetCtlGetInfo(IP_ADDRESS): GetAdaptersInfo buffer overflow.");
 			free(pAdapterInfo);
 			pAdapterInfo = (IP_ADAPTER_INFO*)malloc(bufLen);
 
@@ -202,7 +206,7 @@ s32 cellNetCtlGetInfo(s32 code, vm::ptr<CellNetCtlInfo> info)
 		{
 			PIP_ADAPTER_INFO pAdapter = pAdapterInfo;
 
-			for (int c = 0; c < Ini.NETInterface.GetValue(); c++)
+			for (int c = 0; c < rpcs3::config.misc.net._interface.value(); c++)
 			{
 				pAdapter = pAdapter->Next;
 			}
@@ -212,14 +216,12 @@ s32 cellNetCtlGetInfo(s32 code, vm::ptr<CellNetCtlInfo> info)
 		else
 		{
 			cellNetCtl.Error("cellNetCtlGetInfo(IP_ADDRESS): Call to GetAdaptersInfo failed. (%d)", ret);
-			// 0.0.0.0 seems to be the default address when no ethernet cables are connected to the PS3
-			strcpy_trunc(info->ip_address, "0.0.0.0");
 		}
 
 		free(pAdapterInfo);
 #else
 		struct ifaddrs *ifaddr, *ifa;
-		int family, n;
+		s32 family, n;
 
 		if (getifaddrs(&ifaddr) == -1)
 		{
@@ -233,7 +235,7 @@ s32 cellNetCtlGetInfo(s32 code, vm::ptr<CellNetCtlInfo> info)
 				continue;
 			}
 
-			if (n < Ini.NETInterface.GetValue())
+			if (n < rpcs3::config.misc.net._interface.value())
 			{
 				continue;
 			}
@@ -260,7 +262,7 @@ s32 cellNetCtlGetInfo(s32 code, vm::ptr<CellNetCtlInfo> info)
 
 		if (ret == ERROR_BUFFER_OVERFLOW)
 		{
-			cellNetCtl.Error("cellNetCtlGetInfo(INFO_NETMASK): GetAdaptersAddresses buffer overflow.");
+			cellNetCtl.Error("cellNetCtlGetInfo(INFO_NETMASK): GetAdaptersInfo buffer overflow.");
 			free(pAdapterInfo);
 			pAdapterInfo = (IP_ADAPTER_INFO*)malloc(bufLen);
 
@@ -277,7 +279,7 @@ s32 cellNetCtlGetInfo(s32 code, vm::ptr<CellNetCtlInfo> info)
 		{
 			PIP_ADAPTER_INFO pAdapter = pAdapterInfo;
 
-			for (int c = 0; c < Ini.NETInterface.GetValue(); c++)
+			for (int c = 0; c < rpcs3::config.misc.net._interface.value(); c++)
 			{
 				pAdapter = pAdapter->Next;
 			}
@@ -300,7 +302,7 @@ s32 cellNetCtlGetInfo(s32 code, vm::ptr<CellNetCtlInfo> info)
 		free(pAdapterInfo);
 #else
 		struct ifaddrs *ifaddr, *ifa;
-		int family, n;
+		s32 family, n;
 
 		if (getifaddrs(&ifaddr) == -1)
 		{
@@ -314,7 +316,7 @@ s32 cellNetCtlGetInfo(s32 code, vm::ptr<CellNetCtlInfo> info)
 				continue;
 			}
 
-			if (n < Ini.NETInterface.GetValue())
+			if (n < rpcs3::config.misc.net._interface.value())
 			{
 				continue;
 			}
@@ -336,9 +338,11 @@ s32 cellNetCtlGetInfo(s32 code, vm::ptr<CellNetCtlInfo> info)
 
 s32 cellNetCtlNetStartDialogLoadAsync(vm::ptr<CellNetCtlNetStartDialogParam> param)
 {
-	cellNetCtl.Warning("cellNetCtlNetStartDialogLoadAsync(param=*0x%x)", param);
+	cellNetCtl.Error("cellNetCtlNetStartDialogLoadAsync(param=*0x%x)", param);
 
-	// TODO: Actually sign into PSN or an emulated network similar to PSN
+	// TODO: Actually sign into PSN or an emulated network similar to PSN (ESN)
+	// TODO: Properly open the dialog prompt for sign in
+	sysutilSendSystemCommand(CELL_SYSUTIL_NET_CTL_NETSTART_LOADED, 0);
 	sysutilSendSystemCommand(CELL_SYSUTIL_NET_CTL_NETSTART_FINISHED, 0);
 
 	return CELL_OK;
@@ -346,7 +350,7 @@ s32 cellNetCtlNetStartDialogLoadAsync(vm::ptr<CellNetCtlNetStartDialogParam> par
 
 s32 cellNetCtlNetStartDialogAbortAsync()
 {
-	cellNetCtl.Todo("cellNetCtlNetStartDialogAbortAsync()");
+	cellNetCtl.Error("cellNetCtlNetStartDialogAbortAsync()");
 
 	return CELL_OK;
 }
@@ -355,6 +359,7 @@ s32 cellNetCtlNetStartDialogUnloadAsync(vm::ptr<CellNetCtlNetStartDialogResult> 
 {
 	cellNetCtl.Warning("cellNetCtlNetStartDialogUnloadAsync(result=*0x%x)", result);
 
+	result->result = CELL_NET_CTL_ERROR_DIALOG_CANCELED;
 	sysutilSendSystemCommand(CELL_SYSUTIL_NET_CTL_NETSTART_UNLOADED, 0);
 
 	return CELL_OK;
@@ -420,7 +425,7 @@ s32 cellGameUpdateCheckStartWithoutDialogAsyncEx()
 }
 
 
-Module cellNetCtl("cellNetCtl", []()
+Module<> cellNetCtl("cellNetCtl", []()
 {
 	REG_FUNC(cellNetCtl, cellNetCtlInit);
 	REG_FUNC(cellNetCtl, cellNetCtlTerm);

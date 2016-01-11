@@ -3,13 +3,13 @@
 #include "File.h"
 
 #ifdef _WIN32
+#define _WIN32_WINNT 0x0601
 #include <Windows.h>
+#include <Shlwapi.h>
 
 #define GET_API_ERROR static_cast<u64>(GetLastError())
 
-static_assert(fs::file::null == intptr_t(INVALID_HANDLE_VALUE) && fs::dir::null == fs::file::null, "Check fs::file::null definition");
-
-std::unique_ptr<wchar_t[]> to_wchar(const std::string& source)
+static std::unique_ptr<wchar_t[]> to_wchar(const std::string& source)
 {
 	const auto length = source.size() + 1; // size + null terminator
 
@@ -25,7 +25,7 @@ std::unique_ptr<wchar_t[]> to_wchar(const std::string& source)
 	return buffer;
 }
 
-void to_utf8(std::string& result, const wchar_t* source)
+static void to_utf8(std::string& result, const wchar_t* source)
 {
 	const int length = lstrlenW(source); // source length
 
@@ -49,30 +49,30 @@ void to_utf8(std::string& result, const wchar_t* source)
 	}
 }
 
-time_t to_time_t(const ULARGE_INTEGER& ft)
+static time_t to_time(const ULARGE_INTEGER& ft)
 {
 	return ft.QuadPart / 10000000ULL - 11644473600ULL;
 }
 
-time_t to_time_t(const LARGE_INTEGER& ft)
+static time_t to_time(const LARGE_INTEGER& ft)
 {
 	ULARGE_INTEGER v;
 	v.LowPart = ft.LowPart;
 	v.HighPart = ft.HighPart;
 
-	return to_time_t(v);
+	return to_time(v);
 }
 
-time_t to_time_t(const FILETIME& ft)
+static time_t to_time(const FILETIME& ft)
 {
 	ULARGE_INTEGER v;
 	v.LowPart = ft.dwLowDateTime;
 	v.HighPart = ft.dwHighDateTime;
 
-	return to_time_t(v);
+	return to_time(v);
 }
 
-bool truncate_file(const std::string& file, u64 length)
+static bool truncate_file(const std::string& file, u64 length)
 {
 	// open the file
 	const auto handle = CreateFileW(to_wchar(file).get(), GENERIC_WRITE, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -98,24 +98,32 @@ bool truncate_file(const std::string& file, u64 length)
 }
 
 #else
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <dirent.h>
 #include <fcntl.h>
+#include <libgen.h>
+#include <string.h>
 #include <unistd.h>
 #if defined(__APPLE__) || defined(__FreeBSD__)
 #include <copyfile.h>
+#include <mach-o/dyld.h>
 #else
 #include <sys/sendfile.h>
 #endif
-#include "errno.h"
+#include <errno.h>
 
 #define GET_API_ERROR static_cast<u64>(errno)
 
 #endif
 
+thread_local fse fs::g_tls_error = fse::ok;
+
 bool fs::stat(const std::string& path, stat_t& info)
 {
+	g_tls_error = fse::ok;
+
 #ifdef _WIN32
 	WIN32_FILE_ATTRIBUTE_DATA attrs;
 	if (!GetFileAttributesExW(to_wchar(path).get(), GetFileExInfoStandard, &attrs))
@@ -126,9 +134,9 @@ bool fs::stat(const std::string& path, stat_t& info)
 	info.is_directory = (attrs.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 	info.is_writable = (attrs.dwFileAttributes & FILE_ATTRIBUTE_READONLY) == 0;
 	info.size = (u64)attrs.nFileSizeLow | ((u64)attrs.nFileSizeHigh << 32);
-	info.atime = to_time_t(attrs.ftLastAccessTime);
-	info.mtime = to_time_t(attrs.ftLastWriteTime);
-	info.ctime = to_time_t(attrs.ftCreationTime);
+	info.atime = to_time(attrs.ftLastAccessTime);
+	info.mtime = to_time(attrs.ftLastWriteTime);
+	info.ctime = to_time(attrs.ftCreationTime);
 #else
 	struct stat file_info;
 	if (stat(path.c_str(), &file_info) < 0)
@@ -149,6 +157,8 @@ bool fs::stat(const std::string& path, stat_t& info)
 
 bool fs::exists(const std::string& path)
 {
+	g_tls_error = fse::ok;
+
 #ifdef _WIN32
 	return GetFileAttributesW(to_wchar(path).get()) != 0xFFFFFFFF;
 #else
@@ -159,6 +169,8 @@ bool fs::exists(const std::string& path)
 
 bool fs::is_file(const std::string& file)
 {
+	g_tls_error = fse::ok;
+
 #ifdef _WIN32
 	DWORD attrs;
 	if ((attrs = GetFileAttributesW(to_wchar(file).get())) == INVALID_FILE_ATTRIBUTES)
@@ -180,6 +192,8 @@ bool fs::is_file(const std::string& file)
 
 bool fs::is_dir(const std::string& dir)
 {
+	g_tls_error = fse::ok;
+
 #ifdef _WIN32
 	DWORD attrs;
 	if ((attrs = GetFileAttributesW(to_wchar(dir).get())) == INVALID_FILE_ATTRIBUTES)
@@ -201,10 +215,12 @@ bool fs::is_dir(const std::string& dir)
 
 bool fs::create_dir(const std::string& dir)
 {
+	g_tls_error = fse::ok;
+
 #ifdef _WIN32
 	if (!CreateDirectoryW(to_wchar(dir).get(), NULL))
 #else
-	if (mkdir(dir.c_str(), 0777))
+	if (mkdir(dir.c_str(), S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH))
 #endif
 	{
 		LOG_WARNING(GENERAL, "Error creating directory '%s': 0x%llx", dir, GET_API_ERROR);
@@ -216,48 +232,32 @@ bool fs::create_dir(const std::string& dir)
 
 bool fs::create_path(const std::string& path)
 {
-	size_t start = 0;
+	g_tls_error = fse::ok;
 
-	while (true)
+	std::string parent;
 	{
-		// maybe it could be more optimal if goes from the end recursively
-		size_t pos = path.find_first_of("/\\", start);
-
-		if (pos == std::string::npos)
-		{
-			pos = path.length();
-		}
-
-		std::string dir = path.substr(0, pos);
-
-		start = ++pos;
-
-		if (dir.size() == 0)
-		{
-			continue;
-		}
-
-		if (!is_dir(dir))
-		{
-			// if doesn't exist or not a dir
-			if (!create_dir(dir))
-			{
-				// if creating failed
-				return false;
-			}
-		}
-
-		if (pos >= path.length())
-		{
-			break;
-		}
+#ifdef _WIN32
+		auto copy = to_wchar(path);
+		// PathRemoveFileSpecW only works on paths delimited by '\\'
+		std::replace(copy.get(), copy.get() + path.length(), '/', '\\');
+		PathRemoveFileSpecW(copy.get());
+		to_utf8(parent, copy.get());
+#else
+		std::unique_ptr<char, decltype(std::free) *> copy{ strdup(path.c_str()), std::free };
+		parent = dirname(copy.get());
+#endif
 	}
 
-	return true;
+	if (!is_dir(parent) && !create_path(parent))
+		return false;
+
+	return create_dir(path);
 }
 
 bool fs::remove_dir(const std::string& dir)
 {
+	g_tls_error = fse::ok;
+
 #ifdef _WIN32
 	if (!RemoveDirectoryW(to_wchar(dir).get()))
 #else
@@ -273,6 +273,8 @@ bool fs::remove_dir(const std::string& dir)
 
 bool fs::rename(const std::string& from, const std::string& to)
 {
+	g_tls_error = fse::ok;
+
 #ifdef _WIN32
 	if (!MoveFileW(to_wchar(from).get(), to_wchar(to).get()))
 #else
@@ -288,16 +290,18 @@ bool fs::rename(const std::string& from, const std::string& to)
 
 #ifndef _WIN32
 
-int OSCopyFile(const char* source, const char* destination, bool overwrite)
+static int OSCopyFile(const char* source, const char* destination, bool overwrite)
 {
-	/* This function was taken from http://stackoverflow.com/questions/2180079/how-can-i-copy-a-file-on-unix-using-c */
+	/* Source: http://stackoverflow.com/questions/2180079/how-can-i-copy-a-file-on-unix-using-c */
 
-	int input, output;
-	if ((input = open(source, O_RDONLY)) == -1)
+	const int input = open(source, O_RDONLY);
+	if (input == -1)
 	{
 		return -1;
 	}
-	if ((output = open(destination, O_WRONLY | O_CREAT | (overwrite ? O_TRUNC : O_EXCL), 0666)) == -1)
+
+	const int output = open(destination, O_WRONLY | O_CREAT | (overwrite ? O_TRUNC : O_EXCL), 0666);
+	if (output == -1)
 	{
 		close(input);
 		return -1;
@@ -306,13 +310,12 @@ int OSCopyFile(const char* source, const char* destination, bool overwrite)
 	//Here we use kernel-space copying for performance reasons
 #if defined(__APPLE__) || defined(__FreeBSD__)
 	//fcopyfile works on FreeBSD and OS X 10.5+ 
-	int result = fcopyfile(input, output, 0, COPYFILE_ALL);
+	const int result = fcopyfile(input, output, 0, COPYFILE_ALL);
 #else
 	//sendfile will work with non-socket output (i.e. regular file) on Linux 2.6.33+
 	off_t bytesCopied = 0;
 	struct stat fileinfo = { 0 };
-	fstat(input, &fileinfo);
-	int result = sendfile(output, input, &bytesCopied, fileinfo.st_size) == -1 ? -1 : 0;
+	const int result = fstat(input, &fileinfo) == -1 || sendfile(output, input, &bytesCopied, fileinfo.st_size) == -1 ? -1 : 0;
 #endif
 
 	close(input);
@@ -324,6 +327,8 @@ int OSCopyFile(const char* source, const char* destination, bool overwrite)
 
 bool fs::copy_file(const std::string& from, const std::string& to, bool overwrite)
 {
+	g_tls_error = fse::ok;
+
 #ifdef _WIN32
 	if (!CopyFileW(to_wchar(from).get(), to_wchar(to).get(), !overwrite))
 #else
@@ -339,6 +344,8 @@ bool fs::copy_file(const std::string& from, const std::string& to, bool overwrit
 
 bool fs::remove_file(const std::string& file)
 {
+	g_tls_error = fse::ok;
+
 #ifdef _WIN32
 	if (!DeleteFileW(to_wchar(file).get()))
 #else
@@ -354,6 +361,8 @@ bool fs::remove_file(const std::string& file)
 
 bool fs::truncate_file(const std::string& file, u64 length)
 {
+	g_tls_error = fse::ok;
+
 #ifdef _WIN32
 	if (!::truncate_file(file, length))
 #else
@@ -383,62 +392,64 @@ bool fs::file::open(const std::string& filename, u32 mode)
 {
 	this->close();
 
+	g_tls_error = fse::ok;
+
 #ifdef _WIN32
 	DWORD access = 0;
-	switch (mode & (o_read | o_write | o_append))
+	switch (mode & (fom::read | fom::write | fom::append))
 	{
-	case o_read: access |= GENERIC_READ; break;
-	case o_read | o_append: access |= GENERIC_READ; break;
-	case o_write: access |= GENERIC_WRITE; break;
-	case o_write | o_append: access |= FILE_APPEND_DATA; break;
-	case o_read | o_write: access |= GENERIC_READ | GENERIC_WRITE; break;
-	case o_read | o_write | o_append: access |= GENERIC_READ | FILE_APPEND_DATA; break;
+	case fom::read: access |= GENERIC_READ; break;
+	case fom::read | fom::append: access |= GENERIC_READ; break;
+	case fom::write: access |= GENERIC_WRITE; break;
+	case fom::write | fom::append: access |= FILE_APPEND_DATA; break;
+	case fom::read | fom::write: access |= GENERIC_READ | GENERIC_WRITE; break;
+	case fom::read | fom::write | fom::append: access |= GENERIC_READ | FILE_APPEND_DATA; break;
 	default:
 	{
-		LOG_ERROR(GENERAL, "fs::file::open('%s') failed: neither o_read nor o_write specified (0x%x)", filename, mode);
+		LOG_ERROR(GENERAL, "fs::file::open('%s') failed: neither fom::read nor fom::write specified (0x%x)", filename, mode);
 		return false;
 	}
 	}
 
 	DWORD disp = 0;
-	switch (mode & (o_create | o_trunc | o_excl))
+	switch (mode & (fom::create | fom::trunc | fom::excl))
 	{
 	case 0: disp = OPEN_EXISTING; break;
-	case o_create: disp = OPEN_ALWAYS; break;
-	case o_trunc: disp = TRUNCATE_EXISTING; break;
-	case o_create | o_trunc: disp = CREATE_ALWAYS; break;
-	case o_create | o_excl: disp = CREATE_NEW; break;
-	case o_create | o_excl | o_trunc: disp = CREATE_NEW; break;
+	case fom::create: disp = OPEN_ALWAYS; break;
+	case fom::trunc: disp = TRUNCATE_EXISTING; break;
+	case fom::create | fom::trunc: disp = CREATE_ALWAYS; break;
+	case fom::create | fom::excl: disp = CREATE_NEW; break;
+	case fom::create | fom::excl | fom::trunc: disp = CREATE_NEW; break;
 	}
 
-	if (!disp || (mode & ~(o_read | o_write | o_append | o_create | o_trunc | o_excl)))
+	if (!disp || (mode & ~(fom::read | fom::write | fom::append | fom::create | fom::trunc | fom::excl)))
 	{
 		LOG_ERROR(GENERAL, "fs::file::open('%s') failed: unknown mode specified (0x%x)", filename, mode);
 		return false;
 	}
 
-	m_fd = (intptr_t)CreateFileW(to_wchar(filename).get(), access, FILE_SHARE_READ, NULL, disp, FILE_ATTRIBUTE_NORMAL, NULL);
+	m_fd = (std::intptr_t)CreateFileW(to_wchar(filename).get(), access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, disp, FILE_ATTRIBUTE_NORMAL, NULL);
 #else
 	int flags = 0;
 
-	switch (mode & (o_read | o_write))
+	switch (mode & (fom::read | fom::write))
 	{
-	case o_read: flags |= O_RDONLY; break;
-	case o_write: flags |= O_WRONLY; break;
-	case o_read | o_write: flags |= O_RDWR; break;
+	case fom::read: flags |= O_RDONLY; break;
+	case fom::write: flags |= O_WRONLY; break;
+	case fom::read | fom::write: flags |= O_RDWR; break;
 	default:
 	{
-		LOG_ERROR(GENERAL, "fs::file::open('%s') failed: neither o_read nor o_write specified (0x%x)", filename, mode);
+		LOG_ERROR(GENERAL, "fs::file::open('%s') failed: neither fom::read nor fom::write specified (0x%x)", filename, mode);
 		return false;
 	}
 	}
 
-	if (mode & o_append) flags |= O_APPEND;
-	if (mode & o_create) flags |= O_CREAT;
-	if (mode & o_trunc) flags |= O_TRUNC;
-	if (mode & o_excl) flags |= O_EXCL;
+	if (mode & fom::append) flags |= O_APPEND;
+	if (mode & fom::create) flags |= O_CREAT;
+	if (mode & fom::trunc) flags |= O_TRUNC;
+	if (mode & fom::excl) flags |= O_EXCL;
 
-	if (((mode & o_excl) && !(mode & o_create)) || (mode & ~(o_read | o_write | o_append | o_create | o_trunc | o_excl)))
+	if (((mode & fom::excl) && !(mode & fom::create)) || (mode & ~(fom::read | fom::write | fom::append | fom::create | fom::trunc | fom::excl)))
 	{
 		LOG_ERROR(GENERAL, "fs::file::open('%s') failed: unknown mode specified (0x%x)", filename, mode);
 		return false;
@@ -458,6 +469,8 @@ bool fs::file::open(const std::string& filename, u32 mode)
 
 bool fs::file::trunc(u64 size) const
 {
+	g_tls_error = fse::ok;
+
 #ifdef _WIN32
 	LARGE_INTEGER old, pos;
 
@@ -479,6 +492,8 @@ bool fs::file::trunc(u64 size) const
 
 bool fs::file::stat(stat_t& info) const
 {
+	g_tls_error = fse::ok;
+
 #ifdef _WIN32
 	FILE_BASIC_INFO basic_info;
 
@@ -490,9 +505,9 @@ bool fs::file::stat(stat_t& info) const
 	info.is_directory = (basic_info.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 	info.is_writable = (basic_info.FileAttributes & FILE_ATTRIBUTE_READONLY) == 0;
 	info.size = this->size();
-	info.atime = to_time_t(basic_info.LastAccessTime);
-	info.mtime = to_time_t(basic_info.ChangeTime);
-	info.ctime = to_time_t(basic_info.CreationTime);
+	info.atime = to_time(basic_info.LastAccessTime);
+	info.mtime = to_time(basic_info.ChangeTime);
+	info.ctime = to_time(basic_info.CreationTime);
 #else
 	struct stat file_info;
 	if (fstat(m_fd, &file_info) < 0)
@@ -513,6 +528,8 @@ bool fs::file::stat(stat_t& info) const
 
 bool fs::file::close()
 {
+	g_tls_error = fse::ok;
+
 	if (m_fd == null)
 	{
 		return false;
@@ -530,6 +547,9 @@ bool fs::file::close()
 
 u64 fs::file::read(void* buffer, u64 count) const
 {
+	g_tls_error = fse::ok;
+
+	// TODO (call ReadFile multiple times if count is too big)
 	const int size = count <= INT_MAX ? static_cast<int>(count) : throw EXCEPTION("Invalid count (0x%llx)", count);
 
 #ifdef _WIN32
@@ -547,6 +567,9 @@ u64 fs::file::read(void* buffer, u64 count) const
 
 u64 fs::file::write(const void* buffer, u64 count) const
 {
+	g_tls_error = fse::ok;
+
+	// TODO (call WriteFile multiple times if count is too big)
 	const int size = count <= INT_MAX ? static_cast<int>(count) : throw EXCEPTION("Invalid count (0x%llx)", count);
 
 #ifdef _WIN32
@@ -562,13 +585,19 @@ u64 fs::file::write(const void* buffer, u64 count) const
 #endif
 }
 
-u64 fs::file::seek(u64 offset, u32 mode) const
+u64 fs::file::seek(s64 offset, fsm seek_mode) const
 {
-	assert(mode < 3);
+	g_tls_error = fse::ok;
 
 #ifdef _WIN32
 	LARGE_INTEGER pos;
 	pos.QuadPart = offset;
+
+	const DWORD mode =
+		seek_mode == fsm::begin ? FILE_BEGIN :
+		seek_mode == fsm::cur ? FILE_CURRENT :
+		seek_mode == fsm::end ? FILE_END :
+		throw EXCEPTION("Unknown seek_mode (0x%x)", seek_mode);
 
 	if (!SetFilePointerEx((HANDLE)m_fd, pos, &pos, mode))
 	{
@@ -577,12 +606,20 @@ u64 fs::file::seek(u64 offset, u32 mode) const
 
 	return pos.QuadPart;
 #else
-	return ::lseek(m_fd, offset, mode);
+	const int whence =
+		seek_mode == fsm::begin ? SEEK_SET :
+		seek_mode == fsm::cur ? SEEK_CUR :
+		seek_mode == fsm::end ? SEEK_END :
+		throw EXCEPTION("Unknown seek_mode (0x%x)", seek_mode);
+
+	return ::lseek(m_fd, offset, whence);
 #endif
 }
 
 u64 fs::file::size() const
 {
+	g_tls_error = fse::ok;
+
 #ifdef _WIN32
 	LARGE_INTEGER size;
 	if (!GetFileSizeEx((HANDLE)m_fd, &size))
@@ -604,62 +641,64 @@ u64 fs::file::size() const
 
 fs::dir::~dir()
 {
-	if (m_dd != null)
+	if (m_path)
 	{
 #ifdef _WIN32
-		FindClose((HANDLE)m_dd);
+		if (m_dd != -1) FindClose((HANDLE)m_dd);
 #else
 		::closedir((DIR*)m_dd);
 #endif
 	}
 }
 
-void fs::dir::import(handle_type dd, const std::string& path)
+void fs::file_ptr::reset(const file& f)
 {
-	if (m_dd != null)
+	reset();
+
+	if (f)
 	{
 #ifdef _WIN32
-		FindClose((HANDLE)m_dd);
+		const HANDLE handle = ::CreateFileMapping((HANDLE)f.m_fd, NULL, PAGE_READONLY, 0, 0, NULL);
+		m_ptr = (char*)::MapViewOfFile(handle, FILE_MAP_READ, 0, 0, 0);
+		m_size = f.size();
+		::CloseHandle(handle);
 #else
-		::closedir((DIR*)m_dd);
+		m_ptr = (char*)::mmap(nullptr, m_size = f.size(), PROT_READ, MAP_SHARED, f.m_fd, 0);
+		if (m_ptr == (void*)-1) m_ptr = nullptr;
 #endif
 	}
+}
 
-	m_dd = dd;
-
+void fs::file_ptr::reset()
+{
+	if (m_ptr)
+	{
 #ifdef _WIN32
-	m_path = to_wchar(path);
+		::UnmapViewOfFile(m_ptr);
 #else
-	m_path.reset(new char[path.size() + 1]);
-	memcpy(m_path.get(), path.c_str(), path.size() + 1);
+		::munmap(m_ptr, m_size);
 #endif
+	}
 }
 
 bool fs::dir::open(const std::string& dirname)
 {
-	if (m_dd != null)
-	{
-#ifdef _WIN32
-		FindClose((HANDLE)m_dd);
-#else
-		::closedir((DIR*)m_dd);
-#endif
-	}
+	this->close();
 
-	m_dd = null;
-
-	m_path.reset();
+	g_tls_error = fse::ok;
 
 	if (!is_dir(dirname))
 	{
 		return false;
 	}
 
-#ifdef _WIN32
-	m_path = to_wchar(dirname + "/*");
-#else
 	m_path.reset(new char[dirname.size() + 1]);
-	memcpy(m_path.get(), dirname.c_str(), dirname.size() + 1);
+	std::memcpy(m_path.get(), dirname.c_str(), dirname.size() + 1);
+
+#ifdef _WIN32
+	m_dd = -1;
+#else
+	m_dd = (std::intptr_t)::opendir(m_path.get());
 #endif
 
 	return true;
@@ -667,43 +706,27 @@ bool fs::dir::open(const std::string& dirname)
 
 bool fs::dir::close()
 {
-	if (m_dd == null)
-	{
-		if (m_path)
-		{
-			m_path.reset();
-			return true;
-		}
-		else
-		{
-			return false;
-		}
-	}
+	g_tls_error = fse::ok;
 
-	auto dd = m_dd;
-	m_dd = null;
+	if (!m_path)
+	{
+		return false;
+	}
 
 	m_path.reset();
 
 #ifdef _WIN32
-	return FindClose((HANDLE)dd);
+	CHECK_ASSERTION(m_dd == -1 || FindClose((HANDLE)m_dd));
 #else
-	return !::closedir((DIR*)dd);
+	CHECK_ASSERTION(!::closedir((DIR*)m_dd));
 #endif
+
+	return true;
 }
 
-bool fs::dir::get_first(std::string& name, stat_t& info)
+bool fs::dir::read(std::string& name, stat_t& info)
 {
-	if (m_dd != null) // close previous handle
-	{
-#ifdef _WIN32
-		FindClose((HANDLE)m_dd);
-#else
-		::closedir((DIR*)m_dd);
-#endif
-	}
-
-	m_dd = null;
+	g_tls_error = fse::ok;
 
 	if (!m_path)
 	{
@@ -713,9 +736,16 @@ bool fs::dir::get_first(std::string& name, stat_t& info)
 #ifdef _WIN32
 	WIN32_FIND_DATAW found;
 
-	m_dd = (intptr_t)FindFirstFileW(m_path.get(), &found);
+	if (m_dd == -1)
+	{
+		m_dd = (std::intptr_t)FindFirstFileW(to_wchar(m_path.get() + "/*"s).get(), &found);
 
-	if (m_dd == null)
+		if (m_dd == -1)
+		{
+			return false;
+		}
+	}
+	else if (!FindNextFileW((HANDLE)m_dd, &found))
 	{
 		return false;
 	}
@@ -725,41 +755,9 @@ bool fs::dir::get_first(std::string& name, stat_t& info)
 	info.is_directory = (found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 	info.is_writable = (found.dwFileAttributes & FILE_ATTRIBUTE_READONLY) == 0;
 	info.size = ((u64)found.nFileSizeHigh << 32) | (u64)found.nFileSizeLow;
-	info.atime = to_time_t(found.ftLastAccessTime);
-	info.mtime = to_time_t(found.ftLastWriteTime);
-	info.ctime = to_time_t(found.ftCreationTime);
-
-	return true;
-#else
-	m_dd = (intptr_t)::opendir(m_path.get());
-
-	return get_next(name, info);
-#endif
-}
-
-bool fs::dir::get_next(std::string& name, stat_t& info)
-{
-	if (m_dd == null)
-	{
-		return false;
-	}
-
-#ifdef _WIN32
-	WIN32_FIND_DATAW found;
-
-	if (!FindNextFileW((HANDLE)m_dd, &found))
-	{
-		return false;
-	}
-
-	to_utf8(name, found.cFileName);
-
-	info.is_directory = (found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-	info.is_writable = (found.dwFileAttributes & FILE_ATTRIBUTE_READONLY) == 0;
-	info.size = ((u64)found.nFileSizeHigh << 32) | (u64)found.nFileSizeLow;
-	info.atime = to_time_t(found.ftLastAccessTime);
-	info.mtime = to_time_t(found.ftLastWriteTime);
-	info.ctime = to_time_t(found.ftCreationTime);
+	info.atime = to_time(found.ftLastAccessTime);
+	info.mtime = to_time(found.ftLastWriteTime);
+	info.ctime = to_time(found.ftCreationTime);
 #else
 	const auto found = ::readdir((DIR*)m_dd);
 
@@ -780,4 +778,106 @@ bool fs::dir::get_next(std::string& name, stat_t& info)
 #endif
 
 	return true;
+}
+
+bool fs::dir::first(std::string& name, stat_t& info)
+{
+#ifdef _WIN32
+	if (m_path && m_dd != -1)
+	{
+		CHECK_ASSERTION(FindClose((HANDLE)m_dd));
+		m_dd = -1;
+	}
+#else
+	if (m_path)
+	{
+		::rewinddir((DIR*)m_dd);
+	}
+#endif
+
+	return read(name, info);
+}
+
+std::string fs::get_config_dir()
+{
+	// Use magic static for dir initialization
+	static const std::string s_dir = []
+	{
+#ifdef _WIN32
+		return get_executable_dir(); // ?
+#else
+		std::string dir;
+
+		if (const char* home = ::getenv("XDG_CONFIG_HOME"))
+			dir = home;
+		else if (const char* home = ::getenv("HOME"))
+			dir = home + "/.config"s;
+		else // Just in case
+			dir = "./config";
+
+		dir += "/rpcs3/";
+
+		if (!is_dir(dir) && !create_path(dir))
+		{
+			std::printf("Failed to create configuration directory '%s' (%d).\n", dir.c_str(), errno);
+		}
+
+		return dir;
+#endif
+	}();
+
+	return s_dir;
+}
+
+std::string fs::get_executable_dir()
+{
+	// Use magic static for dir initialization
+	static const std::string s_dir = []
+	{
+		std::string dir;
+
+#ifdef _WIN32
+		wchar_t buf[2048];
+		if (GetModuleFileName(NULL, buf, ::size32(buf)) - 1 >= ::size32(buf) - 1)
+		{
+			MessageBoxA(0, fmt::format("GetModuleFileName() failed (0x%x).", GetLastError()).c_str(), "fs::get_config_dir()", MB_ICONERROR);
+			return dir; // empty
+		}
+	
+		to_utf8(dir, buf); // Convert to UTF-8
+
+#elif __APPLE__
+		char buf[4096];
+		u32 size = sizeof(buf);
+		if (_NSGetExecutablePath(buf, &size))
+		{
+			std::printf("_NSGetExecutablePath() failed (size=0x%x).\n", size);
+			return dir; // empty
+		}
+
+		dir = buf;
+#else
+		char buf[4096];
+		const auto size = ::readlink("/proc/self/exe", buf, sizeof(buf));
+		if (size <= 0 || size >= sizeof(buf))
+		{
+			std::printf("readlink(/proc/self/exe) failed (%d).\n", errno);
+			return dir; // empty
+		}
+
+		dir = { buf, static_cast<std::size_t>(size) };
+#endif
+
+		// Replace "\"
+		for (auto& c : dir)
+		{
+			if (c == '\\') c = '/';
+		}
+
+		// Leave only path
+		dir.resize(dir.rfind('/') + 1);
+		return dir;
+	}();
+
+	return s_dir;
 }

@@ -1,9 +1,9 @@
 #include "stdafx.h"
-#include "rpcs3/Ini.h"
 #include "AutoPause.h"
 #include "Utilities/Log.h"
 #include "Utilities/File.h"
 #include "Emu/System.h"
+#include "Emu/state.h"
 
 using namespace Debug;
 
@@ -43,14 +43,14 @@ AutoPause::~AutoPause(void)
 //This would be able to create in a GUI window.
 void AutoPause::Reload(void)
 {
-	if (fs::is_file("pause.bin"))
+	if (fs::is_file(fs::get_config_dir() + "pause.bin"))
 	{
 		m_pause_function.clear();
 		m_pause_function.reserve(16);
 		m_pause_syscall.clear();
 		m_pause_syscall.reserve(16);
 
-		fs::file list("pause.bin");
+		fs::file list(fs::get_config_dir() + "pause.bin");
 		//System calls ID and Function calls ID are all u32 iirc.
 		u32 num;
 		size_t fmax = list.size();
@@ -77,8 +77,8 @@ void AutoPause::Reload(void)
 		}
 	}
 
-	m_pause_syscall_enable = Ini.DBGAutoPauseSystemCall.GetValue();
-	m_pause_function_enable = Ini.DBGAutoPauseFunctionCall.GetValue();
+	m_pause_syscall_enable = rpcs3::config.misc.debug.auto_pause_syscall.value();
+	m_pause_function_enable = rpcs3::config.misc.debug.auto_pause_func_call.value();
 	initialized = true;
 }
 

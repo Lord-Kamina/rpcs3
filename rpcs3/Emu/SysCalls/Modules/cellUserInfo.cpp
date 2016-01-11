@@ -7,22 +7,28 @@
 #include "Emu/FS/vfsFileBase.h"
 #include "cellUserInfo.h"
 
-extern Module cellUserInfo;
+extern Module<> cellUserInfo;
 
 s32 cellUserInfoGetStat(u32 id, vm::ptr<CellUserInfoUserStat> stat)
 {
 	cellUserInfo.Warning("cellUserInfoGetStat(id=%d, stat=*0x%x)", id, stat);
 
-	if (id > CELL_USERINFO_USER_MAX)
+	if (id > CELL_SYSUTIL_USERID_MAX)
 		return CELL_USERINFO_ERROR_NOUSER;
 
-	char path [256];
+	if (id == CELL_SYSUTIL_USERID_CURRENT)
+	{
+		// TODO: Return current user/profile when that is implemented
+		id = 1;
+	}
+
+	char path[256];
 	sprintf(path, "/dev_hdd0/home/%08d", id);
 	if (!Emu.GetVFS().ExistsDir(path))
 		return CELL_USERINFO_ERROR_NOUSER;
 
 	sprintf(path, "/dev_hdd0/home/%08d/localusername", id);
-	vfsStream* stream = Emu.GetVFS().OpenFile(path, vfsRead);
+	vfsStream* stream = Emu.GetVFS().OpenFile(path, fom::read);
 	if (!stream || !(stream->IsOpened()))
 		return CELL_USERINFO_ERROR_INTERNAL;
 
@@ -73,7 +79,7 @@ s32 cellUserInfoGetList(vm::ptr<u32> listNum, vm::ptr<CellUserInfoUserList> list
 	return CELL_OK;
 }
 
-Module cellUserInfo("cellUserInfo", []()
+Module<> cellUserInfo("cellUserInfo", []()
 {
 	REG_FUNC(cellUserInfo, cellUserInfoGetStat);
 	REG_FUNC(cellUserInfo, cellUserInfoSelectUser_ListType);

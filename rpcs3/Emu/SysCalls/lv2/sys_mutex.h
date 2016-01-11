@@ -1,6 +1,6 @@
 #pragma once
 
-#include "sleep_queue.h"
+#include "Utilities/SleepQueue.h"
 
 namespace vm { using namespace ps3; }
 
@@ -42,8 +42,6 @@ struct lv2_mutex_t
 
 	void unlock(lv2_lock_t& lv2_lock);
 };
-
-REG_ID_TYPE(lv2_mutex_t, 0x85); // SYS_MUTEX_OBJECT
 
 class PPUThread;
 

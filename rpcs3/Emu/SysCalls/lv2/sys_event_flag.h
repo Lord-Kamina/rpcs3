@@ -1,6 +1,6 @@
 #pragma once
 
-#include "sleep_queue.h"
+#include "Utilities/SleepQueue.h"
 
 namespace vm { using namespace ps3; }
 
@@ -69,7 +69,7 @@ struct lv2_event_flag_t
 		return true;
 	}
 
-	inline bool check_pattern(u64 bitptn, u32 mode)
+	bool check_pattern(u64 bitptn, u32 mode)
 	{
 		if ((mode & 0xf) == SYS_EVENT_FLAG_WAIT_AND)
 		{
@@ -85,7 +85,7 @@ struct lv2_event_flag_t
 		}
 	}
 
-	inline u64 clear_pattern(u64 bitptn, u32 mode)
+	u64 clear_pattern(u64 bitptn, u32 mode)
 	{
 		if ((mode & ~0xf) == SYS_EVENT_FLAG_WAIT_CLEAR)
 		{
@@ -107,8 +107,6 @@ struct lv2_event_flag_t
 
 	void notify_all(lv2_lock_t& lv2_lock);
 };
-
-REG_ID_TYPE(lv2_event_flag_t, 0x98); // SYS_EVENT_FLAG_OBJECT
 
 // Aux
 class PPUThread;

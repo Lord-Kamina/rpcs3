@@ -1,9 +1,7 @@
 #include "stdafx.h"
-#include "rpcs3/Ini.h"
+#include "Emu/System.h"
 #include "AudioManager.h"
-#include "AL/OpenALThread.h"
-#include "Null/NullAudioThread.h"
-#include "XAudio2/XAudio2Thread.h"
+#include "Emu/state.h"
 
 AudioManager::AudioManager() : m_audio_out(nullptr)
 {
@@ -20,19 +18,10 @@ void AudioManager::Init()
 
 	m_audio_info.Init();
 
-	switch (Ini.AudioOutMode.GetValue())
-	{
-	default:
-	case 0: m_audio_out = new NullAudioThread(); break;
-	case 1: m_audio_out = new OpenALThread(); break;
-#if defined (_WIN32)
-	case 2: m_audio_out = new XAudio2Thread(); break;
-#endif
-	}
+	m_audio_out = Emu.GetCallbacks().get_audio();
 }
 
 void AudioManager::Close()
 {
-	delete m_audio_out;
-	m_audio_out = nullptr;
+	m_audio_out.reset();
 }

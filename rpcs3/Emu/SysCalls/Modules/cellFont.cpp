@@ -6,23 +6,12 @@
 #include "Emu/FS/vfsFile.h"
 #include "cellFont.h"
 
-extern Module cellFont;
-
-struct font_instance_t
-{
-	std::atomic<bool> init{ false };
-}
-g_font;
+extern Module<> cellFont;
 
 // Functions
 s32 cellFontInitializeWithRevision(u64 revisionFlags, vm::ptr<CellFontConfig> config)
 {
 	cellFont.Warning("cellFontInitializeWithRevision(revisionFlags=0x%llx, config=*0x%x)", revisionFlags, config);
-
-	if (g_font.init.load())
-	{
-		return CELL_FONT_ERROR_ALREADY_INITIALIZED;
-	}
 	
 	if (config->fc_size < 24)
 	{
@@ -34,11 +23,6 @@ s32 cellFontInitializeWithRevision(u64 revisionFlags, vm::ptr<CellFontConfig> co
 		cellFont.Error("cellFontInitializeWithRevision: Unknown flags (0x%x)", config->flags);
 	}
 
-	if (g_font.init.exchange(true))
-	{
-		throw EXCEPTION("Unexpected");
-	}
-
 	return CELL_OK;
 }
 
@@ -48,30 +32,9 @@ s32 cellFontGetRevisionFlags(vm::ptr<u64> revisionFlags)
 	return CELL_OK;
 }
 
-s32 cellFontInit(PPUThread& ppu, vm::ptr<CellFontConfig> config)
-{
-	cellFont.Warning("cellFontInit(config=*0x%x)", config);
-
-	vm::stackvar<be_t<u64>> revisionFlags(ppu);
-	revisionFlags.value() = 0;
-	cellFontGetRevisionFlags(revisionFlags);
-
-	return cellFontInitializeWithRevision(revisionFlags.value(), config);
-}
-
 s32 cellFontEnd()
 {
 	cellFont.Warning("cellFontEnd()");
-
-	if (!g_font.init.load())
-	{
-		return CELL_FONT_ERROR_UNINITIALIZED;
-	}
-
-	if (!g_font.init.exchange(false))
-	{
-		throw EXCEPTION("Unexpected");
-	}
 
 	return CELL_OK;
 }
@@ -86,14 +49,9 @@ s32 cellFontOpenFontMemory(vm::ptr<CellFontLibrary> library, u32 fontAddr, u32 f
 {
 	cellFont.Warning("cellFontOpenFontMemory(library=*0x%x, fontAddr=0x%x, fontSize=%d, subNum=%d, uniqueId=%d, font=*0x%x)", library, fontAddr, fontSize, subNum, uniqueId, font);
 
-	if (!g_font.init.load())
-	{
-		return CELL_FONT_ERROR_UNINITIALIZED;
-	}
-
 	font->stbfont = (stbtt_fontinfo*)((u8*)&(font->stbfont) + sizeof(void*)); // hack: use next bytes of the struct
 
-	if (!stbtt_InitFont(font->stbfont, vm::get_ptr<unsigned char>(fontAddr), 0))
+	if (!stbtt_InitFont(font->stbfont, vm::_ptr<unsigned char>(fontAddr), 0))
 		return CELL_FONT_ERROR_FONT_OPEN_FAILED;
 
 	font->renderer_addr = 0;
@@ -115,7 +73,7 @@ s32 cellFontOpenFontFile(vm::ptr<CellFontLibrary> library, vm::cptr<char> fontPa
 
 	u32 fileSize = (u32)f.GetSize();
 	u32 bufferAddr = vm::alloc(fileSize, vm::main); // Freed in cellFontCloseFont
-	f.Read(vm::get_ptr<void>(bufferAddr), fileSize);
+	f.Read(vm::base(bufferAddr), fileSize);
 	s32 ret = cellFontOpenFontMemory(library, bufferAddr, fileSize, subNum, uniqueId, font);
 	font->origin = CELL_FONT_OPEN_FONT_FILE;
 
@@ -126,11 +84,6 @@ s32 cellFontOpenFontset(PPUThread& ppu, vm::ptr<CellFontLibrary> library, vm::pt
 {
 	cellFont.Warning("cellFontOpenFontset(library=*0x%x, fontType=*0x%x, font=*0x%x)", library, fontType, font);
 
-	if (!g_font.init.load())
-	{
-		return CELL_FONT_ERROR_UNINITIALIZED;
-	}
-	
 	if (fontType->map != CELL_FONT_MAP_UNICODE)
 	{
 		cellFont.Warning("cellFontOpenFontset: Only Unicode is supported");
@@ -202,9 +155,7 @@ s32 cellFontOpenFontset(PPUThread& ppu, vm::ptr<CellFontLibrary> library, vm::pt
 		return CELL_FONT_ERROR_NO_SUPPORT_FONTSET;
 	}
 
-	vm::stackvar<char> f(ppu, (u32)file.length() + 1, 1);
-	memcpy(f.get_ptr(), file.c_str(), file.size() + 1);
-	s32 ret = cellFontOpenFontFile(library, f, 0, 0, font); //TODO: Find the correct values of subNum, uniqueId
+	s32 ret = cellFontOpenFontFile(library, vm::make_str(file), 0, 0, font); //TODO: Find the correct values of subNum, uniqueId
 	font->origin = CELL_FONT_OPEN_FONTSET;
 
 	return ret;
@@ -233,11 +184,6 @@ s32 cellFontSetFontOpenMode(u32 openMode)
 s32 cellFontCreateRenderer(vm::ptr<CellFontLibrary> library, vm::ptr<CellFontRendererConfig> config, vm::ptr<CellFontRenderer> Renderer)
 {
 	cellFont.Todo("cellFontCreateRenderer(library=*0x%x, config=*0x%x, Renderer=*0x%x)", library, config, Renderer);
-
-	if (!g_font.init.load())
-	{
-		return CELL_FONT_ERROR_UNINITIALIZED;
-	}
 	
 	//Write data in Renderer
 
@@ -352,7 +298,7 @@ s32 cellFontGetRenderCharGlyphMetrics(vm::ptr<CellFont> font, u32 code, vm::ptr<
 
 s32 cellFontRenderCharGlyphImage(vm::ptr<CellFont> font, u32 code, vm::ptr<CellFontRenderSurface> surface, float x, float y, vm::ptr<CellFontGlyphMetrics> metrics, vm::ptr<CellFontImageTransInfo> transInfo)
 {
-	cellFont.Log("cellFontRenderCharGlyphImage(font=*0x%x, code=0x%x, surface=*0x%x, x=%f, y=%f, metrics=*0x%x, trans=*0x%x)", font, code, surface, x, y, metrics, transInfo);
+	cellFont.Notice("cellFontRenderCharGlyphImage(font=*0x%x, code=0x%x, surface=*0x%x, x=%f, y=%f, metrics=*0x%x, trans=*0x%x)", font, code, surface, x, y, metrics, transInfo);
 
 	if (!font->renderer_addr)
 	{
@@ -376,7 +322,7 @@ s32 cellFontRenderCharGlyphImage(vm::ptr<CellFont> font, u32 code, vm::ptr<CellF
 	baseLineY = (int)((float)ascent * scale); // ???
 
 	// Move the rendered character to the surface
-	unsigned char* buffer = vm::get_ptr<unsigned char>(surface->buffer.addr());
+	unsigned char* buffer = vm::_ptr<unsigned char>(surface->buffer.addr());
 	for (u32 ypos = 0; ypos < (u32)height; ypos++)
 	{
 		if ((u32)y + ypos + yoff + baseLineY >= surface->height)
@@ -426,7 +372,7 @@ s32 cellFontGetEffectSlant(vm::ptr<CellFont> font, vm::ptr<float> slantParam)
 
 s32 cellFontGetFontIdCode(vm::ptr<CellFont> font, u32 code, vm::ptr<u32> fontId, vm::ptr<u32> fontCode)
 {
-	cellFont.Todo("cellFontGetFontIdCode(font=*0x%x, code=0x%x, fontId=*0x%x, fontCode=*0x%x)", font, code, fontId, fontCode);
+	cellFont.Todo("cellFontGetFontIdCode(font=*0x%x, code=%d, fontId=*0x%x, fontCode=*0x%x)", font, code, fontId, fontCode);
 
 	// TODO: ?
 	return CELL_OK;
@@ -478,11 +424,6 @@ s32 cellFontGraphicsSetFontRGBA()
 s32 cellFontOpenFontsetOnMemory(PPUThread& ppu, vm::ptr<CellFontLibrary> library, vm::ptr<CellFontType> fontType, vm::ptr<CellFont> font)
 {
 	cellFont.Todo("cellFontOpenFontsetOnMemory(library=*0x%x, fontType=*0x%x, font=*0x%x)", library, fontType, font);
-
-	if (!g_font.init.load())
-	{
-		return CELL_FONT_ERROR_UNINITIALIZED;
-	}
 
 	if (fontType->map != CELL_FONT_MAP_UNICODE)
 	{
@@ -632,11 +573,174 @@ s32 cellFontGetCharGlyphMetricsVertical()
 	return CELL_OK;
 }
 
-Module cellFont("cellFont", []()
+s32 cellFontGetRenderEffectWeight()
 {
-	g_font.init = false;
+	throw EXCEPTION("");
+}
 
-	REG_FUNC(cellFont, cellFontInit);
+s32 cellFontGraphicsGetDrawType()
+{
+	throw EXCEPTION("");
+}
+
+s32 cellFontGetKerning()
+{
+	throw EXCEPTION("");
+}
+
+s32 cellFontGetRenderScaledKerning()
+{
+	throw EXCEPTION("");
+}
+
+s32 cellFontGetRenderScalePixel()
+{
+	throw EXCEPTION("");
+}
+
+s32 cellFontGlyphGetScalePixel()
+{
+	throw EXCEPTION("");
+}
+
+s32 cellFontGlyphGetHorizontalShift()
+{
+	throw EXCEPTION("");
+}
+
+s32 cellFontRenderCharGlyphImageHorizontal()
+{
+	throw EXCEPTION("");
+}
+
+s32 cellFontGetEffectWeight()
+{
+	throw EXCEPTION("");
+}
+
+s32 cellFontGetScalePixel()
+{
+	throw EXCEPTION("");
+}
+
+s32 cellFontClearFileCache()
+{
+	throw EXCEPTION("");
+}
+
+s32 cellFontAdjustFontScaling()
+{
+	throw EXCEPTION("");
+}
+
+s32 cellFontSetupRenderScalePoint()
+{
+	throw EXCEPTION("");
+}
+
+s32 cellFontGlyphGetVerticalShift()
+{
+	throw EXCEPTION("");
+}
+
+s32 cellFontGetGlyphExpandBufferInfo()
+{
+	throw EXCEPTION("");
+}
+
+s32 cellFontGetLibrary()
+{
+	throw EXCEPTION("");
+}
+
+s32 cellFontVertexesGlyphRelocate()
+{
+	throw EXCEPTION("");
+}
+
+s32 cellFontGetInitializedRevisionFlags()
+{
+	throw EXCEPTION("");
+}
+
+s32 cellFontGetResolutionDpi()
+{
+	throw EXCEPTION("");
+}
+
+s32 cellFontGlyphRenderImageVertical()
+{
+	throw EXCEPTION("");
+}
+
+s32 cellFontGlyphRenderImageHorizontal()
+{
+	throw EXCEPTION("");
+}
+
+s32 cellFontAdjustGlyphExpandBuffer()
+{
+	throw EXCEPTION("");
+}
+
+s32 cellFontGetRenderScalePoint()
+{
+	throw EXCEPTION("");
+}
+
+s32 cellFontGraphicsGetFontRGBA()
+{
+	throw EXCEPTION("");
+}
+
+s32 cellFontGlyphGetOutlineVertexes()
+{
+	throw EXCEPTION("");
+}
+
+s32 cellFontDelete()
+{
+	throw EXCEPTION("");
+}
+
+s32 cellFontPatchWorks()
+{
+	throw EXCEPTION("");
+}
+
+s32 cellFontGlyphRenderImage()
+{
+	throw EXCEPTION("");
+}
+
+s32 cellFontGetBindingRenderer()
+{
+	throw EXCEPTION("");
+}
+
+s32 cellFontGenerateCharGlyphVertical()
+{
+	throw EXCEPTION("");
+}
+
+s32 cellFontGetRenderEffectSlant()
+{
+	throw EXCEPTION("");
+}
+
+s32 cellFontGetScalePoint()
+{
+	throw EXCEPTION("");
+}
+
+s32 cellFontGraphicsGetLineRGBA()
+{
+	throw EXCEPTION("");
+}
+
+
+Module<> cellFont("cellFont", []()
+{
 	REG_FUNC(cellFont, cellFontSetFontsetOpenMode);
 	REG_FUNC(cellFont, cellFontSetFontOpenMode);
 	REG_FUNC(cellFont, cellFontCreateRenderer);
@@ -685,5 +789,38 @@ Module cellFont("cellFont", []()
 	REG_FUNC(cellFont, cellFontSetResolutionDpi);
 	REG_FUNC(cellFont, cellFontGetCharGlyphMetricsVertical);
 	REG_FUNC(cellFont, cellFontUnbindRenderer);
-	REG_FUNC(cellFont, cellFontGetRevisionFlags);	
+	REG_FUNC(cellFont, cellFontGetRevisionFlags);
+	REG_FUNC(cellFont, cellFontGetRenderEffectWeight);
+	REG_FUNC(cellFont, cellFontGraphicsGetDrawType);
+	REG_FUNC(cellFont, cellFontGetKerning);
+	REG_FUNC(cellFont, cellFontGetRenderScaledKerning);
+	REG_FUNC(cellFont, cellFontGetRenderScalePixel);
+	REG_FUNC(cellFont, cellFontGlyphGetScalePixel);
+	REG_FUNC(cellFont, cellFontGlyphGetHorizontalShift);
+	REG_FUNC(cellFont, cellFontRenderCharGlyphImageHorizontal);
+	REG_FUNC(cellFont, cellFontGetEffectWeight);
+	REG_FUNC(cellFont, cellFontGetScalePixel);
+	REG_FUNC(cellFont, cellFontClearFileCache);
+	REG_FUNC(cellFont, cellFontAdjustFontScaling);
+	REG_FUNC(cellFont, cellFontSetupRenderScalePoint);
+	REG_FUNC(cellFont, cellFontGlyphGetVerticalShift);
+	REG_FUNC(cellFont, cellFontGetGlyphExpandBufferInfo);
+	REG_FUNC(cellFont, cellFontGetLibrary);
+	REG_FUNC(cellFont, cellFontVertexesGlyphRelocate);
+	REG_FUNC(cellFont, cellFontGetInitializedRevisionFlags);
+	REG_FUNC(cellFont, cellFontGetResolutionDpi);
+	REG_FUNC(cellFont, cellFontGlyphRenderImageVertical);
+	REG_FUNC(cellFont, cellFontGlyphRenderImageHorizontal);
+	REG_FUNC(cellFont, cellFontAdjustGlyphExpandBuffer);
+	REG_FUNC(cellFont, cellFontGetRenderScalePoint);
+	REG_FUNC(cellFont, cellFontGraphicsGetFontRGBA);
+	REG_FUNC(cellFont, cellFontGlyphGetOutlineVertexes);
+	REG_FUNC(cellFont, cellFontDelete);
+	REG_FUNC(cellFont, cellFontPatchWorks);
+	REG_FUNC(cellFont, cellFontGlyphRenderImage);
+	REG_FUNC(cellFont, cellFontGetBindingRenderer);
+	REG_FUNC(cellFont, cellFontGenerateCharGlyphVertical);
+	REG_FUNC(cellFont, cellFontGetRenderEffectSlant);
+	REG_FUNC(cellFont, cellFontGetScalePoint);
+	REG_FUNC(cellFont, cellFontGraphicsGetLineRGBA);
 });

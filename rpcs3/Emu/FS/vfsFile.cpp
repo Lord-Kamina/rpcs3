@@ -26,21 +26,6 @@ bool vfsFile::Open(const std::string& path, u32 mode)
 	return m_stream && m_stream->IsOpened();
 }
 
-bool vfsFile::Exists(const std::string& path)
-{
-	return m_stream->Exists(path);
-}
-
-bool vfsFile::Rename(const std::string& from, const std::string& to)
-{
-	return m_stream->Rename(from, to);
-}
-
-bool vfsFile::Remove(const std::string& path)
-{
-	return m_stream->Remove(path);
-}
-
 bool vfsFile::Close()
 {
 	m_stream.reset();
@@ -63,7 +48,7 @@ u64 vfsFile::Read(void* dst, u64 size)
 	return m_stream->Read(dst, size);
 }
 
-u64 vfsFile::Seek(s64 offset, u32 mode)
+u64 vfsFile::Seek(s64 offset, fsm mode)
 {
 	return m_stream->Seek(offset, mode);
 }

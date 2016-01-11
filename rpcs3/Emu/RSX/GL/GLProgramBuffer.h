@@ -1,25 +1,24 @@
 #pragma once
-#include "GLProgram.h"
+#include "GLVertexProgram.h"
+#include "GLFragmentProgram.h"
 #include "../Common/ProgramStateCache.h"
-#include "Utilities/File.h"
 
 struct GLTraits
 {
 	typedef GLVertexProgram VertexProgramData;
 	typedef GLFragmentProgram FragmentProgramData;
-	typedef GLProgram PipelineData;
+	typedef gl::glsl::program PipelineData;
 	typedef void* PipelineProperties;
 	typedef void* ExtraData;
 
 	static
 	void RecompileFragmentProgram(RSXFragmentProgram *RSXFP, FragmentProgramData& fragmentProgramData, size_t ID)
 	{
-		fragmentProgramData.Decompile(*RSXFP);
+		fragmentProgramData.Decompile(*RSXFP, RSXFP->texture_dimensions);
 		fragmentProgramData.Compile();
 		//checkForGlError("m_fragment_prog.Compile");
 
-		// TODO: This shouldn't use current dir
-		fs::file("./FragmentProgram.txt", o_write | o_create | o_trunc).write(fragmentProgramData.shader.c_str(), fragmentProgramData.shader.size());
+		fs::file(fs::get_config_dir() + "FragmentProgram.txt", fom::rewrite) << fragmentProgramData.shader;
 	}
 
 	static
@@ -29,19 +28,24 @@ struct GLTraits
 		vertexProgramData.Compile();
 		//checkForGlError("m_vertex_prog.Compile");
 
-		// TODO: This shouldn't use current dir
-		fs::file("./VertexProgram.txt", o_write | o_create | o_trunc).write(vertexProgramData.shader.c_str(), vertexProgramData.shader.size());
+		fs::file(fs::get_config_dir() + "VertexProgram.txt", fom::rewrite) << vertexProgramData.shader;
 	}
 
 	static
 	PipelineData *BuildProgram(VertexProgramData &vertexProgramData, FragmentProgramData &fragmentProgramData, const PipelineProperties &pipelineProperties, const ExtraData& extraData)
 	{
-		GLProgram *result = new GLProgram();
-		result->Create(vertexProgramData.id, fragmentProgramData.id);
-		//checkForGlError("m_program.Create");
-		result->Use();
+		PipelineData *result = new PipelineData();
+		__glcheck result->create()
+			.attach(gl::glsl::shader_view(vertexProgramData.id))
+			.attach(gl::glsl::shader_view(fragmentProgramData.id))
+			.bind_fragment_data_location("ocol0", 0)
+			.bind_fragment_data_location("ocol1", 1)
+			.bind_fragment_data_location("ocol2", 2)
+			.bind_fragment_data_location("ocol3", 3)
+			.make();
+		__glcheck result->use();
 
-		LOG_NOTICE(RSX, "*** prog id = %d", result->id);
+		LOG_NOTICE(RSX, "*** prog id = %d", result->id());
 		LOG_NOTICE(RSX, "*** vp id = %d", vertexProgramData.id);
 		LOG_NOTICE(RSX, "*** fp id = %d", fragmentProgramData.id);
 
@@ -54,7 +58,7 @@ struct GLTraits
 	static
 	void DeleteProgram(PipelineData *ptr)
 	{
-		ptr->Delete();
+		ptr->remove();
 	}
 };
 

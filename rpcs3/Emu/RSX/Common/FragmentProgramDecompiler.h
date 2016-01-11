@@ -19,9 +19,15 @@
  */
 class FragmentProgramDecompiler
 {
+	OPDEST dst;
+	SRC0 src0;
+	SRC1 src1;
+	SRC2 src2;
+
 	std::string main;
 	u32 m_addr;
 	u32& m_size;
+	const std::vector<texture_dimension> m_texture_dimensions;
 	u32 m_const_index;
 	u32 m_offset;
 	u32 m_location;
@@ -48,6 +54,27 @@ class FragmentProgramDecompiler
 	std::string BuildCode();
 
 	u32 GetData(const u32 d) const { return d << 16 | d >> 16; }
+
+	/**
+	 * Emits code if opcode is an SCT one and returns true,
+	 * otherwise do nothing and return false.
+	 * NOTE: What does SCT means ???
+	 */
+	bool handle_sct(u32 opcode);
+
+	/**
+	* Emits code if opcode is an SCB one and returns true,
+	* otherwise do nothing and return false.
+	* NOTE: What does SCB means ???
+	*/
+	bool handle_scb(u32 opcode);
+
+	/**
+	* Emits code if opcode is an TEX SRB one and returns true,
+	* otherwise do nothing and return false.
+	* NOTE: What does TEX SRB means ???
+	*/
+	bool handle_tex_srb(u32 opcode);
 protected:
 	u32 m_ctrl;
 	/** returns the type name of float vectors.
@@ -86,7 +113,6 @@ protected:
 	virtual void insertMainEnd(std::stringstream &OS) = 0;
 public:
 	ParamArray m_parr;
-	FragmentProgramDecompiler() = delete;
-	FragmentProgramDecompiler(u32 addr, u32& size, u32 ctrl);
+	FragmentProgramDecompiler(u32 addr, u32& size, u32 ctrl, const std::vector<texture_dimension> &texture_dimensions);
 	std::string Decompile();
 };

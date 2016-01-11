@@ -2,13 +2,13 @@
 	path = wxWidgets
 	url = https://github.com/wxWidgets/wxWidgets
 	ignore = dirty
-	branch = master
 [submodule "rpcs3-ffmpeg"]
 	path = ffmpeg
-	url = https://github.com/bigpet/ppsspp-ffmpeg
+	url = https://github.com/hrydgard/ppsspp-ffmpeg
 [submodule "asmjit"]
 	path = asmjit
 	url = https://github.com/kobalicek/asmjit
+	ignore = dirty
 [submodule "llvm"]
 	path = llvm
 	url = https://github.com/llvm-mirror/llvm
@@ -16,3 +16,9 @@
 [submodule "minidx9"]
 	path = minidx9
 	url = https://github.com/hrydgard/minidx9.git
+[submodule "rsx_program_decompiler"]
+	path = rsx_program_decompiler
+	url = https://github.com/RPCS3/rsx_program_decompiler
+[submodule "GSL"]
+	path = GSL
+	url = https://github.com/Microsoft/GSL.git

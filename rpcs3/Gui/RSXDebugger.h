@@ -2,9 +2,7 @@
 
 #include <wx/listctrl.h>
 
-
-
-class RSXDebugger : public wxFrame
+class RSXDebugger : public wxDialog
 {
 	u32 m_addr;
 
@@ -17,8 +15,9 @@ class RSXDebugger : public wxFrame
 
 	u32 m_item_count;
 	wxListView* m_list_commands;
+	wxListView* m_list_captured_frame;
+	wxListView* m_list_captured_draw_calls;
 	wxListView* m_list_flags;
-	wxListView* m_list_programs;
 	wxListView* m_list_lightning;
 	wxListView* m_list_texture;
 	wxListView* m_list_settings;
@@ -30,6 +29,11 @@ class RSXDebugger : public wxFrame
 	wxPanel* p_buffer_depth;
 	wxPanel* p_buffer_stencil;
 	wxPanel* p_buffer_tex;
+
+	wxImage buffer_img[4];
+
+	wxTextCtrl* m_text_transform_program;
+	wxTextCtrl *m_text_shader_program;
 
 	uint m_cur_texture;
 
@@ -45,6 +49,7 @@ public:
 	virtual void OnChangeToolsAddr(wxCommandEvent& event);
 	virtual void OnScrollMemory(wxMouseEvent& event);
 	virtual void OnClickBuffer(wxMouseEvent& event);
+	virtual void OnClickDrawCalls(wxMouseEvent &event);
 
 	virtual void GoToGet(wxCommandEvent& event);
 	virtual void GoToPut(wxCommandEvent& event);
@@ -53,7 +58,6 @@ public:
 	virtual void GetMemory();
 	virtual void GetBuffers();
 	virtual void GetFlags();
-	virtual void GetPrograms();
 	virtual void GetLightning();
 	virtual void GetTexture();
 	virtual void GetSettings();

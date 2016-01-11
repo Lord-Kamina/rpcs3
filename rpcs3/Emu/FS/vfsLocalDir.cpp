@@ -20,7 +20,7 @@ bool vfsLocalDir::Open(const std::string& path)
 	std::string name;
 	fs::stat_t file_info;
 
-	for (bool is_ok = m_dir.get_first(name, file_info); is_ok; is_ok = m_dir.get_next(name, file_info))
+	while (m_dir.read(name, file_info))
 	{
 		m_entries.emplace_back();
 
@@ -36,26 +36,6 @@ bool vfsLocalDir::Open(const std::string& path)
 	}
 
 	return true;
-}
-
-bool vfsLocalDir::Create(const std::string& path)
-{
-	return fs::create_dir(path);
-}
-
-bool vfsLocalDir::IsExists(const std::string& path) const
-{
-	return fs::is_dir(path);
-}
-
-bool vfsLocalDir::Rename(const std::string& from, const std::string& to)
-{
-	return fs::rename(from, to);
-}
-
-bool vfsLocalDir::Remove(const std::string& path)
-{
-	return fs::remove_dir(path);
 }
 
 bool vfsLocalDir::IsOpened() const

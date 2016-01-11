@@ -2,15 +2,15 @@
 
 class wxString;
 
-#if defined(_MSC_VER)
+#if defined(_MSC_VER) && _MSC_VER <= 1800
 #define snprintf _snprintf
 #endif
 
 namespace fmt
 {
-	struct empty_t{};
+	//struct empty_t{};
 
-	extern const std::string placeholder;
+	//extern const std::string placeholder;
 
 	template <typename T>
 	std::string AfterLast(const std::string& source, T searchstr)
@@ -90,37 +90,6 @@ namespace fmt
 	//	return result;
 	//}
 
-	//small wrapper used to deal with bitfields
-	template<typename T>
-	T by_value(T x) { return x; }
-
-	//wrapper to deal with advance sprintf formating options with automatic length finding
-	template<typename... Args> std::string Format(const char* fmt, Args... parameters)
-	{
-		size_t length = 256;
-		std::string str;
-
-		for (;;)
-		{
-			std::vector<char> buffptr(length);
-#if !defined(_MSC_VER)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wformat-security"
-			size_t printlen = snprintf(buffptr.data(), length, fmt, std::forward<Args>(parameters)...);
-#pragma GCC diagnostic pop
-#else
-			size_t printlen = _snprintf_s(buffptr.data(), length, length - 1, fmt, std::forward<Args>(parameters)...);
-#endif
-			if (printlen < length)
-			{
-				str = std::string(buffptr.data(), printlen);
-				break;
-			}
-			length *= 2;
-		}
-		return str;
-	}
-
 	std::string replace_first(const std::string& src, const std::string& from, const std::string& to);
 	std::string replace_all(const std::string &src, const std::string& from, const std::string& to);
 
@@ -172,12 +141,11 @@ namespace fmt
 		return src;
 	}
 
-	std::string to_hex(u64 value, size_t count = 1);
+	std::string to_hex(u64 value, u64 count = 1);
 	std::string to_udec(u64 value);
 	std::string to_sdec(s64 value);
 
-	template<typename T, bool is_enum = std::is_enum<T>::value>
-	struct unveil
+	template<typename T, bool is_enum = std::is_enum<T>::value> struct unveil
 	{
 		using result_type = T;
 
@@ -187,8 +155,7 @@ namespace fmt
 		}
 	};
 
-	template<>
-	struct unveil<char*, false>
+	template<> struct unveil<char*, false>
 	{
 		using result_type = const char*;
 
@@ -198,8 +165,7 @@ namespace fmt
 		}
 	};
 
-	template<size_t N>
-	struct unveil<const char[N], false>
+	template<std::size_t N> struct unveil<const char[N], false>
 	{
 		using result_type = const char*;
 
@@ -209,8 +175,7 @@ namespace fmt
 		}
 	};
 
-	template<>
-	struct unveil<std::string, false>
+	template<> struct unveil<std::string, false>
 	{
 		using result_type = const char*;
 
@@ -220,8 +185,7 @@ namespace fmt
 		}
 	};
 
-	template<typename T>
-	struct unveil<T, true>
+	template<typename T> struct unveil<T, true>
 	{
 		using result_type = std::underlying_type_t<T>;
 
@@ -231,25 +195,13 @@ namespace fmt
 		}
 	};
 
-	template<typename T>
-	struct unveil<be_t<T>, false>
+	template<typename T, bool Se> struct unveil<se_t<T, Se>, false>
 	{
 		using result_type = typename unveil<T>::result_type;
 
-		force_inline static result_type get_value(const be_t<T>& arg)
+		force_inline static result_type get_value(const se_t<T, Se>& arg)
 		{
-			return unveil<T>::get_value(arg.value());
-		}
-	};
-
-	template<typename T>
-	struct unveil<le_t<T>, false>
-	{
-		using result_type = typename unveil<T>::result_type;
-
-		force_inline static result_type get_value(const le_t<T>& arg)
-		{
-			return unveil<T>::get_value(arg.value());
+			return unveil<T>::get_value(arg);
 		}
 	};
 
@@ -259,52 +211,73 @@ namespace fmt
 		return unveil<T>::get_value(arg);
 	}
 
-	/*
-	fmt::format(const char* fmt, args...)
-
-	Formatting function with special functionality:
-
-	std::string forced to .c_str()
-	be_t<> forced to .value() (fmt::unveil reverts byte order automatically)
-
-	External specializations for fmt::unveil (can be found in another headers):
-	vm::ptr, vm::bptr, ... (fmt::unveil) (vm_ptr.h) (with appropriate address type, using .addr() can be avoided)
-	vm::ref, vm::bref, ... (fmt::unveil) (vm_ref.h)
-	
-	*/
-	template<typename... Args> force_inline safe_buffers std::string format(const char* fmt, Args... args)
+	// Formatting function with special functionality:
+	//
+	// std::string is forced to .c_str()
+	// be_t<> is forced to .value() (fmt::do_unveil reverts byte order automatically)
+	//
+	// External specializations for fmt::do_unveil (can be found in another headers):
+	// vm::ptr, vm::bptr, ... (fmt::do_unveil) (vm_ptr.h) (with appropriate address type, using .addr() can be avoided)
+	// vm::ref, vm::bref, ... (fmt::do_unveil) (vm_ref.h)
+	//
+	template<typename... Args> safe_buffers std::string format(const char* fmt, Args... args)
 	{
-		return Format(fmt, do_unveil(args)...);
+		// fixed stack buffer for the first attempt
+		std::array<char, 4096> fixed_buf;
+
+		// possibly dynamically allocated buffer for the second attempt
+		std::unique_ptr<char[]> buf;
+
+		// pointer to the current buffer
+		char* buf_addr = fixed_buf.data();
+
+		for (std::size_t buf_size = fixed_buf.size();;)
+		{
+#ifndef _MSC_VER
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-security"
+#endif
+			const std::size_t len = std::snprintf(buf_addr, buf_size, fmt, do_unveil(args)...);
+#ifndef _MSC_VER
+#pragma GCC diagnostic pop
+#endif
+			if (len > INT_MAX)
+			{
+				throw std::runtime_error("std::snprintf() failed");
+			}
+
+			if (len < buf_size)
+			{
+				return{ buf_addr, len };
+			}
+
+			buf.reset(buf_addr = new char[buf_size = len + 1]);
+		}
 	}
 
-	struct exception
+	struct exception : public std::exception
 	{
 		std::unique_ptr<char[]> message;
 
-		template<typename... Args> never_inline safe_buffers exception(const char* file, int line, const char* func, const char* text, Args... args)
+		template<typename... Args> never_inline safe_buffers exception(const char* file, int line, const char* func, const char* text, Args... args) noexcept
 		{
 			const std::string data = format(text, args...) + format("\n(in file %s:%d, in function %s)", file, line, func);
 
-			message = std::make_unique<char[]>(data.size() + 1);
+			message.reset(new char[data.size() + 1]);
 
 			std::memcpy(message.get(), data.c_str(), data.size() + 1);
 		}
 
-		exception(const exception& other)
+		exception(const exception& other) noexcept
 		{
-			const std::size_t size = std::strlen(other);
+			const std::size_t size = std::strlen(other.message.get());
 
-			message = std::make_unique<char[]>(size + 1);
+			message.reset(new char[size + 1]);
 
-			std::memcpy(message.get(), other, size + 1);
+			std::memcpy(message.get(), other.message.get(), size + 1);
 		}
 
-		exception(exception&& other)
-		{
-			message = std::move(other.message);
-		}
-
-		operator const char*() const
+		virtual const char* what() const noexcept override
 		{
 			return message.get();
 		}
@@ -329,6 +302,7 @@ namespace fmt
 	std::vector<std::string> rSplit(const std::string& source, const std::string& delim);
 
 	std::vector<std::string> split(const std::string& source, std::initializer_list<std::string> separators, bool is_skip_empty = true);
+	std::string trim(const std::string& source, const std::string& values = " \t");
 
 	template<typename T>
 	std::string merge(const T& source, const std::string& separator)
@@ -380,4 +354,5 @@ namespace fmt
 	std::string tolower(std::string source);
 	std::string toupper(std::string source);
 	std::string escape(std::string source);
+	bool match(const std::string &source, const std::string &mask);
 }

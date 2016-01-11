@@ -1,8 +1,6 @@
 #include "stdafx.h"
 #include "key_vault.h"
 #include "unedat.h"
-#include "Utilities/Log.h"
-#include "Utilities/File.h"
 
 void generate_key(int crypto_mode, int version, unsigned char *key_final, unsigned char *iv_final, unsigned char *key, unsigned char *iv)
 {
@@ -164,16 +162,16 @@ int decrypt_data(const fs::file* in, const fs::file* out, EDAT_HEADER *edat, NPD
 	unsigned char empty_iv[0x10] = {};
 
 	// Decrypt the metadata.
-	int i;
-	for (i = 0; i < block_num; i++)
+	for (int i = 0; i < block_num; i++)
 	{
 		memset(hash_result, 0, 0x14);
 
 		if ((edat->flags & EDAT_COMPRESSED_FLAG) != 0)
 		{
 			metadata_sec_offset = metadata_offset + (unsigned long long) i * metadata_section_size;
-			in->seek(metadata_sec_offset);
 
+			CHECK_ASSERTION(in->seek(metadata_sec_offset) != -1);
+			
 			unsigned char metadata[0x20];
 			memset(metadata, 0, 0x20);
 			in->read(metadata, 0x20);
@@ -201,7 +199,7 @@ int decrypt_data(const fs::file* in, const fs::file* out, EDAT_HEADER *edat, NPD
 		{
 			// If FLAG 0x20, the metadata precedes each data block.
 			metadata_sec_offset = metadata_offset + (unsigned long long) i * (metadata_section_size + length);
-			in->seek(metadata_sec_offset);
+			CHECK_ASSERTION(in->seek(metadata_sec_offset) != -1);
 
 			unsigned char metadata[0x20];
 			memset(metadata, 0, 0x20);
@@ -222,7 +220,7 @@ int decrypt_data(const fs::file* in, const fs::file* out, EDAT_HEADER *edat, NPD
 		else
 		{
 			metadata_sec_offset = metadata_offset + (unsigned long long) i * metadata_section_size;
-			in->seek(metadata_sec_offset);
+			CHECK_ASSERTION(in->seek(metadata_sec_offset) != -1);
 
 			in->read(hash_result, 0x10);
 			offset = metadata_offset + (unsigned long long) i * edat->block_size + (unsigned long long) block_num * metadata_section_size;
@@ -244,7 +242,8 @@ int decrypt_data(const fs::file* in, const fs::file* out, EDAT_HEADER *edat, NPD
 		memset(hash, 0, 0x10);
 		memset(key_result, 0, 0x10);
 
-		in->seek(offset);
+		CHECK_ASSERTION(in->seek(offset) != -1);
+
 		in->read(enc_data, length);
 
 		// Generate a key for the current block.
@@ -291,7 +290,10 @@ int decrypt_data(const fs::file* in, const fs::file* out, EDAT_HEADER *edat, NPD
 			{
 				if (verbose)
 					LOG_WARNING(LOADER, "EDAT: Block at offset 0x%llx has invalid hash!", (u64)offset);
-					
+				
+				delete[] enc_data;
+				delete[] dec_data;
+				delete[] b_key;
 				return 1;
 			}
 		}
@@ -337,6 +339,7 @@ int decrypt_data(const fs::file* in, const fs::file* out, EDAT_HEADER *edat, NPD
 
 		delete[] enc_data;
 		delete[] dec_data;
+		delete[] b_key;
 	}
 
 	return 0;
@@ -344,7 +347,7 @@ int decrypt_data(const fs::file* in, const fs::file* out, EDAT_HEADER *edat, NPD
 
 int check_data(unsigned char *key, EDAT_HEADER *edat, NPD_HEADER *npd, const fs::file* f, bool verbose)
 {
-	f->seek(0);
+	CHECK_ASSERTION(f->seek(0) != -1);
 	unsigned char header[0xA0];
 	unsigned char empty_header[0xA0];
 	unsigned char header_hash[0x10];
@@ -389,7 +392,8 @@ int check_data(unsigned char *key, EDAT_HEADER *edat, NPD_HEADER *npd, const fs:
 	f->read(header, 0xA0);
 
 	// Read in the header and metadata section hashes.
-	f->seek(0x90);
+	CHECK_ASSERTION(f->seek(0x90) != -1);
+
 	f->read(metadata_hash, 0x10);
 	f->read(header_hash, 0x10);
 
@@ -445,7 +449,7 @@ int check_data(unsigned char *key, EDAT_HEADER *edat, NPD_HEADER *npd, const fs:
 	while (bytes_to_read > 0)
 	{
 		// Locate the metadata blocks.
-		f->seek(metadata_section_offset);
+		CHECK_ASSERTION(f->seek(metadata_section_offset) != -1);
 
 		// Read in the metadata.
 		f->read(metadata + bytes_read, metadata_section_size);
@@ -492,9 +496,9 @@ int check_data(unsigned char *key, EDAT_HEADER *edat, NPD_HEADER *npd, const fs:
 
 
 		// Read in the metadata and header signatures.
-		f->seek(0xB0);
+		CHECK_ASSERTION(f->seek(0xB0) != -1);
 		f->read(metadata_signature, 0x28);
-		f->seek(0xD8);
+		CHECK_ASSERTION(f->seek(0xD8) != -1);
 		f->read(header_signature, 0x28);
 
 		// Checking metadata signature.
@@ -510,7 +514,7 @@ int check_data(unsigned char *key, EDAT_HEADER *edat, NPD_HEADER *npd, const fs:
 			{
 				int metadata_buf_size = block_num * 0x10;
 				unsigned char *metadata_buf = new unsigned char[metadata_buf_size];
-				f->seek(metadata_offset);
+				CHECK_ASSERTION(f->seek(metadata_offset) != -1);
 				f->read(metadata_buf, metadata_buf_size);
 				sha1(metadata_buf, metadata_buf_size, signature_hash);
 				delete[] metadata_buf;
@@ -543,7 +547,7 @@ int check_data(unsigned char *key, EDAT_HEADER *edat, NPD_HEADER *npd, const fs:
 			// Setup header signature hash.
 			memset(signature_hash, 0, 20);
 			unsigned char *header_buf = new unsigned char[0xD8];
-			f->seek(0x00);
+			CHECK_ASSERTION(f->seek(0x00) != -1);
 			f->read(header_buf, 0xD8);
 			sha1(header_buf, 0xD8, signature_hash );
 			delete[] header_buf;
@@ -815,7 +819,7 @@ int DecryptEDAT(const std::string& input_file_name, const std::string& output_fi
 {
 	// Prepare the files.
 	fs::file input(input_file_name);
-	fs::file output(output_file_name, o_write | o_create | o_trunc);
+	fs::file output(output_file_name, fom::rewrite);
 	fs::file rap(rap_file_name);
 
 	// Set keys (RIF and DEVKLIC).

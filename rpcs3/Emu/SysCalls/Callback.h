@@ -1,27 +1,27 @@
 #pragma once
 
-class CPUThread;
+class PPUThread;
 
 class CallbackManager
 {
-	using check_cb_t = std::function<s32(CPUThread&)>;
-	using async_cb_t = std::function<void(CPUThread&)>;
+	using check_cb_t = std::function<s32(PPUThread&)>;
+	using async_cb_t = std::function<void(PPUThread&)>;
 
 	std::mutex m_mutex;
 
 	std::queue<check_cb_t> m_check_cb;
 	std::queue<async_cb_t> m_async_cb;
 
-	std::shared_ptr<CPUThread> m_cb_thread;
+	std::shared_ptr<PPUThread> m_cb_thread;
 
 public:
-	// register checked callback (accepts CPUThread&, returns s32)
+	// Register checked callback
 	void Register(check_cb_t func);
 
-	// register async callback, called in callback thread (accepts CPUThread&)
+	// Register async callback, called in callback thread
 	void Async(async_cb_t func);
 
-	// get one registered callback
+	// Get one registered callback
 	check_cb_t Check();
 
 	void Init();

@@ -1,30 +1,17 @@
 #include "stdafx.h"
-#include "Utilities/Log.h"
 #include "Emu/Memory/Memory.h"
 #include "Emu/System.h"
 #include "Emu/SysCalls/Callback.h"
 
 #include "Emu/Cell/RawSPUThread.h"
 
+// Originally, SPU MFC registers are accessed externally in a concurrent manner (don't mix with channels, SPU MFC channels are isolated)
 thread_local spu_mfc_arg_t raw_spu_mfc[8] = {};
 
 RawSPUThread::RawSPUThread(const std::string& name, u32 index)
-	: SPUThread(CPU_THREAD_RAW_SPU, name, COPY_EXPR(fmt::format("RawSPU%d[0x%x] Thread (%s)[0x%08x]", index, m_id, m_name.c_str(), PC)), index, RAW_SPU_BASE_ADDR + RAW_SPU_OFFSET * index)
+	: SPUThread(CPU_THREAD_RAW_SPU, name, index, RAW_SPU_BASE_ADDR + RAW_SPU_OFFSET * index)
 {
-	if (!vm::falloc(offset, 0x40000))
-	{
-		throw EXCEPTION("Failed to allocate RawSPU local storage");
-	}
-}
-
-RawSPUThread::~RawSPUThread()
-{
-	join();
-
-	if (!vm::dealloc(offset))
-	{
-		throw EXCEPTION("Failed to deallocate RawSPU local storage");
-	}
+	CHECK_ASSERTION(vm::falloc(offset, 0x40000) == offset);
 }
 
 bool RawSPUThread::read_reg(const u32 addr, u32& value)
@@ -47,13 +34,11 @@ bool RawSPUThread::read_reg(const u32 addr, u32& value)
 
 	case SPU_Out_MBox_offs:
 	{
-		bool notify;
+		value = ch_out_mbox.pop();
 
-		std::tie(value, notify) = ch_out_mbox.pop();
-
-		if (notify)
+		if (ch_out_mbox.notification_required)
 		{
-			// notify if necessary
+			// lock for reliable notification
 			std::lock_guard<std::mutex> lock(mutex);
 
 			cv.notify_one();
@@ -70,7 +55,7 @@ bool RawSPUThread::read_reg(const u32 addr, u32& value)
 		
 	case SPU_Status_offs:
 	{
-		value = status.load();
+		value = status;
 		return true;
 	}
 	}
@@ -172,7 +157,6 @@ bool RawSPUThread::write_reg(const u32 addr, const u32 value)
 
 	case Prxy_QueryMask_offs:
 	{
-		//proxy_tag_mask = value;
 		return true;
 	}
 
@@ -180,7 +164,7 @@ bool RawSPUThread::write_reg(const u32 addr, const u32 value)
 	{
 		if (ch_in_mbox.push(value))
 		{
-			// notify if necessary
+			// lock for reliable notification
 			std::lock_guard<std::mutex> lock(mutex);
 
 			cv.notify_one();
@@ -205,7 +189,7 @@ bool RawSPUThread::write_reg(const u32 addr, const u32 value)
 			break;
 		}
 
-		run_ctrl.store(value);
+		run_ctrl = value;
 		return true;
 	}
 
@@ -216,7 +200,7 @@ bool RawSPUThread::write_reg(const u32 addr, const u32 value)
 			break;
 		}
 
-		npc.store(value);
+		npc = value;
 		return true;
 	}
 
@@ -237,17 +221,17 @@ bool RawSPUThread::write_reg(const u32 addr, const u32 value)
 	return false;
 }
 
-void RawSPUThread::task()
+void RawSPUThread::cpu_task()
 {
 	// get next PC and SPU Interrupt status
-	PC = npc.exchange(0);
+	pc = npc.exchange(0);
 
-	set_interrupt_status((PC & 1) != 0);
+	set_interrupt_status((pc & 1) != 0);
 
-	PC &= 0x3FFFC;
+	pc &= 0x3fffc;
 
-	SPUThread::task();
+	SPUThread::cpu_task();
 
 	// save next PC and current SPU Interrupt status
-	npc.store(PC | ((ch_event_stat.load() & SPU_EVENT_INTR_ENABLED) != 0));
+	npc = pc | ((ch_event_stat & SPU_EVENT_INTR_ENABLED) != 0);
 }

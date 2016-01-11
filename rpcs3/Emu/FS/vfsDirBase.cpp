@@ -1,5 +1,4 @@
 #include "stdafx.h"
-#include "Utilities/File.h"
 #include "vfsDirBase.h"
 
 vfsDirBase::vfsDirBase(vfsDevice* device)
@@ -14,11 +13,10 @@ vfsDirBase::~vfsDirBase()
 
 bool vfsDirBase::Open(const std::string& path)
 {
-	if(IsOpened())
+	if (IsOpened())
+	{
 		Close();
-
-	if(!IsExists(path))
-		return false;
+	}
 
 	m_pos = 0;
 	m_cwd += '/' + path;
@@ -28,11 +26,6 @@ bool vfsDirBase::Open(const std::string& path)
 bool vfsDirBase::IsOpened() const
 {
 	return !m_cwd.empty();
-}
-
-bool vfsDirBase::IsExists(const std::string& path) const
-{
-	return false;
 }
 
 const std::vector<DirEntryInfo>& vfsDirBase::GetEntries() const

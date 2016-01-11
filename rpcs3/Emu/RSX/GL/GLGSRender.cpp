@@ -1,811 +1,21 @@
 #include "stdafx.h"
-#include "rpcs3/Ini.h"
 #include "Utilities/rPlatform.h" // only for rImage
-#include "Utilities/File.h"
-#include "Utilities/Log.h"
 #include "Emu/Memory/Memory.h"
 #include "Emu/System.h"
+#include "Emu/state.h"
 #include "GLGSRender.h"
+#include "../rsx_methods.h"
 
-GetGSFrameCb GetGSFrame = nullptr;
-
-void SetGetGSFrameCallback(GetGSFrameCb value)
-{
-	GetGSFrame = value;
-}
-
-#define CMD_DEBUG 0
 #define DUMP_VERTEX_DATA 0
 
-#if CMD_DEBUG
-#define CMD_LOG(...) LOG_NOTICE(RSX, __VA_ARGS__)
-#else
-#define CMD_LOG(...)
-#endif
-
-GLuint g_flip_tex, g_depth_tex, g_pbo[6];
-int last_width = 0, last_height = 0, last_depth_format = 0;
-
-GLenum g_last_gl_error = GL_NO_ERROR;
-void printGlError(GLenum err, const char* situation)
+GLGSRender::GLGSRender() : GSRender(frame_type::OpenGL)
 {
-	if (err != GL_NO_ERROR)
-	{
-		LOG_ERROR(RSX, "%s: opengl error 0x%04x", situation, err);
-		Emu.Pause();
-	}
-}
-void printGlError(GLenum err, const std::string& situation)
-{
-	printGlError(err, situation.c_str());
+	shaders_cache.load(rsx::shader_language::glsl);
 }
 
-#if 0
-#define checkForGlError(x) /*x*/
-#endif
-
-void GLTexture::Create()
+u32 GLGSRender::enable(u32 condition, u32 cap)
 {
-	if (m_id)
-	{
-		Delete();
-	}
-
-	if (!m_id)
-	{
-		glGenTextures(1, &m_id);
-		checkForGlError("GLTexture::Init() -> glGenTextures");
-		Bind();
-	}
-}
-
-int GLTexture::GetGlWrap(int wrap)
-{
-	switch (wrap)
-	{
-	case CELL_GCM_TEXTURE_WRAP: return GL_REPEAT;
-	case CELL_GCM_TEXTURE_MIRROR: return GL_MIRRORED_REPEAT;
-	case CELL_GCM_TEXTURE_CLAMP_TO_EDGE: return GL_CLAMP_TO_EDGE;
-	case CELL_GCM_TEXTURE_BORDER: return GL_CLAMP_TO_BORDER;
-	case CELL_GCM_TEXTURE_CLAMP: return GL_CLAMP;
-	case CELL_GCM_TEXTURE_MIRROR_ONCE_CLAMP_TO_EDGE: return GL_MIRROR_CLAMP_TO_EDGE_EXT;
-	case CELL_GCM_TEXTURE_MIRROR_ONCE_BORDER: return GL_MIRROR_CLAMP_TO_BORDER_EXT;
-	case CELL_GCM_TEXTURE_MIRROR_ONCE_CLAMP: return GL_MIRROR_CLAMP_EXT;
-	}
-
-	LOG_ERROR(RSX, "Texture wrap error: bad wrap (%d).", wrap);
-	return GL_REPEAT;
-}
-
-float GLTexture::GetMaxAniso(int aniso)
-{
-	switch (aniso)
-	{
-	case CELL_GCM_TEXTURE_MAX_ANISO_1: return 1.0f;
-	case CELL_GCM_TEXTURE_MAX_ANISO_2: return 2.0f;
-	case CELL_GCM_TEXTURE_MAX_ANISO_4: return 4.0f;
-	case CELL_GCM_TEXTURE_MAX_ANISO_6: return 6.0f;
-	case CELL_GCM_TEXTURE_MAX_ANISO_8: return 8.0f;
-	case CELL_GCM_TEXTURE_MAX_ANISO_10: return 10.0f;
-	case CELL_GCM_TEXTURE_MAX_ANISO_12: return 12.0f;
-	case CELL_GCM_TEXTURE_MAX_ANISO_16: return 16.0f;
-	}
-
-	LOG_ERROR(RSX, "Texture anisotropy error: bad max aniso (%d).", aniso);
-	return 1.0f;
-}
-
-void GLTexture::Init(RSXTexture& tex)
-{
-	if (tex.GetLocation() > 1)
-	{
-		return;
-	}
-
-	Bind();
-
-	const u32 texaddr = GetAddress(tex.GetOffset(), tex.GetLocation());
-	//LOG_WARNING(RSX, "texture addr = 0x%x, width = %d, height = %d, max_aniso=%d, mipmap=%d, remap=0x%x, zfunc=0x%x, wraps=0x%x, wrapt=0x%x, wrapr=0x%x, minlod=0x%x, maxlod=0x%x", 
-	//	m_offset, m_width, m_height, m_maxaniso, m_mipmap, m_remap, m_zfunc, m_wraps, m_wrapt, m_wrapr, m_minlod, m_maxlod);
-	
-	//TODO: safe init
-	checkForGlError("GLTexture::Init() -> glBindTexture");
-
-	int format = tex.GetFormat() & ~(CELL_GCM_TEXTURE_LN | CELL_GCM_TEXTURE_UN);
-	bool is_swizzled = !(tex.GetFormat() & CELL_GCM_TEXTURE_LN);
-
-	auto pixels = vm::get_ptr<const u8>(texaddr);
-	u8 *unswizzledPixels;
-	static const GLint glRemapStandard[4] = { GL_ALPHA, GL_RED, GL_GREEN, GL_BLUE };
-	// NOTE: This must be in ARGB order in all forms below.
-	const GLint *glRemap = glRemapStandard;
-
-	switch (format)
-	{
-	case CELL_GCM_TEXTURE_B8: // One 8-bit fixed-point number
-	{
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tex.GetWidth(), tex.GetHeight(), 0, GL_BLUE, GL_UNSIGNED_BYTE, pixels);
-		checkForGlError("GLTexture::Init() -> glTexImage2D(CELL_GCM_TEXTURE_B8)");
-
-		static const GLint swizzleMaskB8[] = { GL_BLUE, GL_BLUE, GL_BLUE, GL_BLUE };
-		glRemap = swizzleMaskB8;
-		break;
-	}
-
-	case CELL_GCM_TEXTURE_A1R5G5B5:
-	{
-		glPixelStorei(GL_UNPACK_SWAP_BYTES, GL_TRUE);
-		checkForGlError("GLTexture::Init() -> glPixelStorei");
-
-		// TODO: texture swizzling
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tex.GetWidth(), tex.GetHeight(), 0, GL_BGRA, GL_UNSIGNED_SHORT_1_5_5_5_REV, pixels);
-		checkForGlError("GLTexture::Init() -> glTexImage2D(CELL_GCM_TEXTURE_A1R5G5B5)");
-
-		glPixelStorei(GL_UNPACK_SWAP_BYTES, GL_FALSE);
-		checkForGlError("GLTexture::Init() -> glPixelStorei(CELL_GCM_TEXTURE_A1R5G5B5)");
-		break;
-	}
-
-	case CELL_GCM_TEXTURE_A4R4G4B4:
-	{
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tex.GetWidth(), tex.GetHeight(), 0, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4, pixels);
-		checkForGlError("GLTexture::Init() -> glTexImage2D(CELL_GCM_TEXTURE_A4R4G4B4)");
-
-		// We read it in as R4G4B4A4, so we need to remap each component.
-		static const GLint swizzleMaskA4R4G4B4[] = { GL_BLUE, GL_ALPHA, GL_RED, GL_GREEN };
-		glRemap = swizzleMaskA4R4G4B4;
-		break;
-	}
-
-	case CELL_GCM_TEXTURE_R5G6B5:
-	{
-		glPixelStorei(GL_UNPACK_SWAP_BYTES, GL_TRUE);
-		checkForGlError("GLTexture::Init() -> glPixelStorei(CELL_GCM_TEXTURE_R5G6B5)");
-
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, tex.GetWidth(), tex.GetHeight(), 0, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, pixels);
-		checkForGlError("GLTexture::Init() -> glTexImage2D(CELL_GCM_TEXTURE_R5G6B5)");
-
-		glPixelStorei(GL_UNPACK_SWAP_BYTES, GL_FALSE);
-		checkForGlError("GLTexture::Init() -> glPixelStorei(CELL_GCM_TEXTURE_R5G6B5)");
-		break;
-	}
-
-	case CELL_GCM_TEXTURE_A8R8G8B8:
-	{
-		if (is_swizzled)
-		{
-			u32 *src, *dst;
-			u32 log2width, log2height;
-
-			unswizzledPixels = (u8*)malloc(tex.GetWidth() * tex.GetHeight() * 4);
-			src = (u32*)pixels;
-			dst = (u32*)unswizzledPixels;
-
-			log2width = log(tex.GetWidth()) / log(2);
-			log2height = log(tex.GetHeight()) / log(2);
-
-			for (int i = 0; i < tex.GetHeight(); i++)
-			{
-				for (int j = 0; j < tex.GetWidth(); j++)
-				{
-					dst[(i*tex.GetWidth()) + j] = src[LinearToSwizzleAddress(j, i, 0, log2width, log2height, 0)];
-				}
-			}
-		}
-
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tex.GetWidth(), tex.GetHeight(), 0, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8, is_swizzled ? unswizzledPixels : pixels);
-		checkForGlError("GLTexture::Init() -> glTexImage2D(CELL_GCM_TEXTURE_A8R8G8B8)");
-		break;
-	}
-
-	case CELL_GCM_TEXTURE_COMPRESSED_DXT1: // Compressed 4x4 pixels into 8 bytes
-	{
-		u32 size = ((tex.GetWidth() + 3) / 4) * ((tex.GetHeight() + 3) / 4) * 8;
-
-		glCompressedTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_RGBA_S3TC_DXT1_EXT, tex.GetWidth(), tex.GetHeight(), 0, size, pixels);
-		checkForGlError("GLTexture::Init() -> glCompressedTexImage2D(CELL_GCM_TEXTURE_COMPRESSED_DXT1)");
-		break;
-	}
-
-	case CELL_GCM_TEXTURE_COMPRESSED_DXT23: // Compressed 4x4 pixels into 16 bytes
-	{
-		u32 size = ((tex.GetWidth() + 3) / 4) * ((tex.GetHeight() + 3) / 4) * 16;
-
-		glCompressedTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_RGBA_S3TC_DXT3_EXT, tex.GetWidth(), tex.GetHeight(), 0, size, pixels);
-		checkForGlError("GLTexture::Init() -> glCompressedTexImage2D(CELL_GCM_TEXTURE_COMPRESSED_DXT23)");
-	}
-		break;
-
-	case CELL_GCM_TEXTURE_COMPRESSED_DXT45: // Compressed 4x4 pixels into 16 bytes
-	{
-		u32 size = ((tex.GetWidth() + 3) / 4) * ((tex.GetHeight() + 3) / 4) * 16;
-
-		glCompressedTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_RGBA_S3TC_DXT5_EXT, tex.GetWidth(), tex.GetHeight(), 0, size, pixels);
-		checkForGlError("GLTexture::Init() -> glCompressedTexImage2D(CELL_GCM_TEXTURE_COMPRESSED_DXT45)");
-		break;
-	}
-
-	case CELL_GCM_TEXTURE_G8B8:
-	{
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tex.GetWidth(), tex.GetHeight(), 0, GL_RG, GL_UNSIGNED_BYTE, pixels);
-		checkForGlError("GLTexture::Init() -> glTexImage2D(CELL_GCM_TEXTURE_G8B8)");
-
-		static const GLint swizzleMaskG8B8[] = { GL_RED, GL_GREEN, GL_RED, GL_GREEN };
-		glRemap = swizzleMaskG8B8;
-		break;
-	}
-
-	case CELL_GCM_TEXTURE_R6G5B5:
-	{
-		// TODO: Probably need to actually unswizzle if is_swizzled.
-		const u32 numPixels = tex.GetWidth() * tex.GetHeight();
-		unswizzledPixels = (u8 *)malloc(numPixels * 4);
-		// TODO: Speed.
-		for (u32 i = 0; i < numPixels; ++i) {
-			u16 c = reinterpret_cast<const be_t<u16> *>(pixels)[i];
-			unswizzledPixels[i * 4 + 0] = Convert6To8((c >> 10) & 0x3F);
-			unswizzledPixels[i * 4 + 1] = Convert5To8((c >> 5) & 0x1F);
-			unswizzledPixels[i * 4 + 2] = Convert5To8((c >> 0) & 0x1F);
-			unswizzledPixels[i * 4 + 3] = 255;
-		}
-
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tex.GetWidth(), tex.GetHeight(), 0, GL_RGBA, GL_UNSIGNED_BYTE, unswizzledPixels);
-		checkForGlError("GLTexture::Init() -> glTexImage2D(CELL_GCM_TEXTURE_R6G5B5)");
-
-		free(unswizzledPixels);
-		break;
-	}
-
-	case CELL_GCM_TEXTURE_DEPTH24_D8: //  24-bit unsigned fixed-point number and 8 bits of garbage
-	{
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, tex.GetWidth(), tex.GetHeight(), 0, GL_DEPTH_COMPONENT, GL_UNSIGNED_BYTE, pixels);
-		checkForGlError("GLTexture::Init() -> glTexImage2D(CELL_GCM_TEXTURE_DEPTH24_D8)");
-		break;
-	}
-
-	case CELL_GCM_TEXTURE_DEPTH24_D8_FLOAT: // 24-bit unsigned float and 8 bits of garbage
-	{
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, tex.GetWidth(), tex.GetHeight(), 0, GL_DEPTH_COMPONENT, GL_FLOAT, pixels);
-		checkForGlError("GLTexture::Init() -> glTexImage2D(CELL_GCM_TEXTURE_DEPTH24_D8_FLOAT)");
-		break;
-	}
-
-	case CELL_GCM_TEXTURE_DEPTH16: // 16-bit unsigned fixed-point number
-	{
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT16, tex.GetWidth(), tex.GetHeight(), 0, GL_DEPTH_COMPONENT, GL_SHORT, pixels);
-		checkForGlError("GLTexture::Init() -> glTexImage2D(CELL_GCM_TEXTURE_DEPTH16)");
-		break;
-	}
-
-	case CELL_GCM_TEXTURE_DEPTH16_FLOAT: // 16-bit unsigned float
-	{
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT16, tex.GetWidth(), tex.GetHeight(), 0, GL_DEPTH_COMPONENT, GL_FLOAT, pixels);
-		checkForGlError("GLTexture::Init() -> glTexImage2D(CELL_GCM_TEXTURE_DEPTH16_FLOAT)");
-		break;
-	}
-
-	case CELL_GCM_TEXTURE_X16: // A 16-bit fixed-point number
-	{
-		glPixelStorei(GL_UNPACK_SWAP_BYTES, GL_TRUE);
-		checkForGlError("GLTexture::Init() -> glPixelStorei(CELL_GCM_TEXTURE_X16)");
-
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tex.GetWidth(), tex.GetHeight(), 0, GL_RED, GL_UNSIGNED_SHORT, pixels);
-		checkForGlError("GLTexture::Init() -> glTexImage2D(CELL_GCM_TEXTURE_X16)");
-
-		glPixelStorei(GL_UNPACK_SWAP_BYTES, GL_FALSE);
-		checkForGlError("GLTexture::Init() -> glPixelStorei(CELL_GCM_TEXTURE_X16)");
-
-		static const GLint swizzleMaskX16[] = { GL_RED, GL_ONE, GL_RED, GL_ONE };
-		glRemap = swizzleMaskX16;
-		break;
-	}
-
-	case CELL_GCM_TEXTURE_Y16_X16: // Two 16-bit fixed-point numbers
-	{
-		glPixelStorei(GL_UNPACK_SWAP_BYTES, GL_TRUE);
-		checkForGlError("GLTexture::Init() -> glPixelStorei(CELL_GCM_TEXTURE_Y16_X16)");
-
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tex.GetWidth(), tex.GetHeight(), 0, GL_RG, GL_UNSIGNED_SHORT, pixels);
-		checkForGlError("GLTexture::Init() -> glTexImage2D(CELL_GCM_TEXTURE_Y16_X16)");
-
-		glPixelStorei(GL_UNPACK_SWAP_BYTES, GL_FALSE);
-		checkForGlError("GLTexture::Init() -> glPixelStorei(CELL_GCM_TEXTURE_Y16_X16)");
-
-		static const GLint swizzleMaskX32_Y16_X16[] = { GL_GREEN, GL_RED, GL_GREEN, GL_RED };
-		glRemap = swizzleMaskX32_Y16_X16;
-		break;
-	}
-
-	case CELL_GCM_TEXTURE_R5G5B5A1:
-	{
-		glPixelStorei(GL_UNPACK_SWAP_BYTES, GL_TRUE);
-		checkForGlError("GLTexture::Init() -> glPixelStorei(CELL_GCM_TEXTURE_R5G5B5A1)");
-
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tex.GetWidth(), tex.GetHeight(), 0, GL_RGBA, GL_UNSIGNED_SHORT_5_5_5_1, pixels);
-		checkForGlError("GLTexture::Init() -> glTexImage2D(CELL_GCM_TEXTURE_R5G5B5A1)");
-
-		glPixelStorei(GL_UNPACK_SWAP_BYTES, GL_FALSE);
-		checkForGlError("GLTexture::Init() -> glPixelStorei(CELL_GCM_TEXTURE_R5G5B5A1)");
-		break;
-	}
-
-	case CELL_GCM_TEXTURE_W16_Z16_Y16_X16_FLOAT: // Four fp16 values
-	{
-		glPixelStorei(GL_UNPACK_SWAP_BYTES, GL_TRUE);
-		checkForGlError("GLTexture::Init() -> glPixelStorei(CELL_GCM_TEXTURE_W16_Z16_Y16_X16_FLOAT)");
-
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tex.GetWidth(), tex.GetHeight(), 0, GL_RGBA, GL_HALF_FLOAT, pixels);
-		checkForGlError("GLTexture::Init() -> glTexImage2D(CELL_GCM_TEXTURE_W16_Z16_Y16_X16_FLOAT)");
-
-		glPixelStorei(GL_UNPACK_SWAP_BYTES, GL_FALSE);
-		checkForGlError("GLTexture::Init() -> glPixelStorei(CELL_GCM_TEXTURE_W16_Z16_Y16_X16_FLOAT)");
-		break;
-	}
-
-	case CELL_GCM_TEXTURE_W32_Z32_Y32_X32_FLOAT: // Four fp32 values
-	{
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tex.GetWidth(), tex.GetHeight(), 0, GL_BGRA, GL_FLOAT, pixels);
-		checkForGlError("GLTexture::Init() -> glTexImage2D(CELL_GCM_TEXTURE_W32_Z32_Y32_X32_FLOAT)");
-		break;
-	}
-
-	case CELL_GCM_TEXTURE_X32_FLOAT: // One 32-bit floating-point number
-	{
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tex.GetWidth(), tex.GetHeight(), 0, GL_RED, GL_FLOAT, pixels);
-		checkForGlError("GLTexture::Init() -> glTexImage2D(CELL_GCM_TEXTURE_X32_FLOAT)");
-
-		static const GLint swizzleMaskX32_FLOAT[] = { GL_RED, GL_ONE, GL_ONE, GL_ONE };
-		glRemap = swizzleMaskX32_FLOAT;
-		break;
-	}
-
-	case CELL_GCM_TEXTURE_D1R5G5B5:
-	{
-		glPixelStorei(GL_UNPACK_SWAP_BYTES, GL_TRUE);
-		checkForGlError("GLTexture::Init() -> glPixelStorei(CELL_GCM_TEXTURE_D1R5G5B5)");
-
-		// TODO: Texture swizzling
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tex.GetWidth(), tex.GetHeight(), 0, GL_BGRA, GL_UNSIGNED_SHORT_1_5_5_5_REV, pixels);
-		checkForGlError("GLTexture::Init() -> glTexImage2D(CELL_GCM_TEXTURE_D1R5G5B5)");
-
-		static const GLint swizzleMaskX32_D1R5G5B5[] = { GL_ONE, GL_RED, GL_GREEN, GL_BLUE };
-		glRemap = swizzleMaskX32_D1R5G5B5;
-
-		glPixelStorei(GL_UNPACK_SWAP_BYTES, GL_FALSE);
-		checkForGlError("GLTexture::Init() -> glPixelStorei(CELL_GCM_TEXTURE_D1R5G5B5)");
-		break;
-	}
-
-	case CELL_GCM_TEXTURE_D8R8G8B8: // 8 bits of garbage and three unsigned 8-bit fixed-point numbers
-	{
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tex.GetWidth(), tex.GetHeight(), 0, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8, pixels);
-		checkForGlError("GLTexture::Init() -> glTexImage2D(CELL_GCM_TEXTURE_D8R8G8B8)");
-
-		static const GLint swizzleMaskX32_D8R8G8B8[] = { GL_ONE, GL_RED, GL_GREEN, GL_BLUE };
-		glRemap = swizzleMaskX32_D8R8G8B8;
-		break;
-	}
-
-
-	case CELL_GCM_TEXTURE_Y16_X16_FLOAT: // Two fp16 values
-	{
-		glPixelStorei(GL_UNPACK_SWAP_BYTES, GL_TRUE);
-		checkForGlError("GLTexture::Init() -> glPixelStorei(CELL_GCM_TEXTURE_Y16_X16_FLOAT)");
-
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tex.GetWidth(), tex.GetHeight(), 0, GL_RG, GL_HALF_FLOAT, pixels);
-		checkForGlError("GLTexture::Init() -> glTexImage2D(CELL_GCM_TEXTURE_Y16_X16_FLOAT)");
-
-		glPixelStorei(GL_UNPACK_SWAP_BYTES, GL_FALSE);
-		checkForGlError("GLTexture::Init() -> glPixelStorei(CELL_GCM_TEXTURE_Y16_X16_FLOAT)");
-
-		static const GLint swizzleMaskX32_Y16_X16_FLOAT[] = { GL_RED, GL_GREEN, GL_RED, GL_GREEN };
-		glRemap = swizzleMaskX32_Y16_X16_FLOAT;
-		break;
-	}
-
-	case ~(CELL_GCM_TEXTURE_LN | CELL_GCM_TEXTURE_UN) & CELL_GCM_TEXTURE_COMPRESSED_B8R8_G8R8:
-	{
-		const u32 numPixels = tex.GetWidth() * tex.GetHeight();
-		unswizzledPixels = (u8 *)malloc(numPixels * 4);
-		// TODO: Speed.
-		for (u32 i = 0; i < numPixels; i += 2)
-		{
-			unswizzledPixels[i * 4 + 0 + 0] = pixels[i * 2 + 3];
-			unswizzledPixels[i * 4 + 0 + 1] = pixels[i * 2 + 2];
-			unswizzledPixels[i * 4 + 0 + 2] = pixels[i * 2 + 0];
-			unswizzledPixels[i * 4 + 0 + 3] = 255;
-
-			// The second pixel is the same, except for red.
-			unswizzledPixels[i * 4 + 4 + 0] = pixels[i * 2 + 1];
-			unswizzledPixels[i * 4 + 4 + 1] = pixels[i * 2 + 2];
-			unswizzledPixels[i * 4 + 4 + 2] = pixels[i * 2 + 0];
-			unswizzledPixels[i * 4 + 4 + 3] = 255;
-		}
-
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tex.GetWidth(), tex.GetHeight(), 0, GL_RGBA, GL_UNSIGNED_BYTE, unswizzledPixels);
-		checkForGlError("GLTexture::Init() -> glTexImage2D(CELL_GCM_TEXTURE_COMPRESSED_B8R8_G8R8 & ~(CELL_GCM_TEXTURE_LN | CELL_GCM_TEXTURE_UN)");
-
-		free(unswizzledPixels);
-		break;
-	}
-
-	case ~(CELL_GCM_TEXTURE_LN | CELL_GCM_TEXTURE_UN) & CELL_GCM_TEXTURE_COMPRESSED_R8B8_R8G8:
-	{
-		const u32 numPixels = tex.GetWidth() * tex.GetHeight();
-		unswizzledPixels = (u8 *)malloc(numPixels * 4);
-		// TODO: Speed.
-		for (u32 i = 0; i < numPixels; i += 2)
-		{
-			unswizzledPixels[i * 4 + 0 + 0] = pixels[i * 2 + 2];
-			unswizzledPixels[i * 4 + 0 + 1] = pixels[i * 2 + 3];
-			unswizzledPixels[i * 4 + 0 + 2] = pixels[i * 2 + 1];
-			unswizzledPixels[i * 4 + 0 + 3] = 255;
-
-			// The second pixel is the same, except for red.
-			unswizzledPixels[i * 4 + 4 + 0] = pixels[i * 2 + 0];
-			unswizzledPixels[i * 4 + 4 + 1] = pixels[i * 2 + 3];
-			unswizzledPixels[i * 4 + 4 + 2] = pixels[i * 2 + 1];
-			unswizzledPixels[i * 4 + 4 + 3] = 255;
-		}
-
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tex.GetWidth(), tex.GetHeight(), 0, GL_RGBA, GL_UNSIGNED_BYTE, unswizzledPixels);
-		checkForGlError("GLTexture::Init() -> glTexImage2D(CELL_GCM_TEXTURE_COMPRESSED_R8B8_R8G8 & ~(CELL_GCM_TEXTURE_LN | CELL_GCM_TEXTURE_UN)");
-
-		free(unswizzledPixels);
-		break;
-	}
-
-	default:
-	{
-		LOG_ERROR(RSX, "Init tex error: Bad tex format (0x%x | %s | 0x%x)", format, (is_swizzled ? "swizzled" : "linear"), tex.GetFormat() & 0x40);
-		break;
-	}
-	}
-
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, tex.GetMipmap() - 1);
-	glTexParameteri(GL_TEXTURE_2D, GL_GENERATE_MIPMAP, tex.GetMipmap() > 1);
-
-	if (format != CELL_GCM_TEXTURE_B8 && format != CELL_GCM_TEXTURE_X16 && format != CELL_GCM_TEXTURE_X32_FLOAT)
-	{
-		u8 remap_a = tex.GetRemap() & 0x3;
-		u8 remap_r = (tex.GetRemap() >> 2) & 0x3;
-		u8 remap_g = (tex.GetRemap() >> 4) & 0x3;
-		u8 remap_b = (tex.GetRemap() >> 6) & 0x3;
-
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_A, glRemap[remap_a]);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R, glRemap[remap_r]);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_G, glRemap[remap_g]);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_B, glRemap[remap_b]);
-	}
-	else
-	{
-
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_A, glRemap[0]);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R, glRemap[1]);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_G, glRemap[2]);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_B, glRemap[3]);
-	}
-
-	checkForGlError("GLTexture::Init() -> remap");
-
-	static const int gl_tex_zfunc[] =
-	{
-		GL_NEVER,
-		GL_LESS,
-		GL_EQUAL,
-		GL_LEQUAL,
-		GL_GREATER,
-		GL_NOTEQUAL,
-		GL_GEQUAL,
-		GL_ALWAYS,
-	};
-
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GetGlWrap(tex.GetWrapS()));
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GetGlWrap(tex.GetWrapT()));
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_R, GetGlWrap(tex.GetWrapR()));
-
-	checkForGlError("GLTexture::Init() -> wrap");
-
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, gl_tex_zfunc[tex.GetZfunc()]);
-
-	checkForGlError("GLTexture::Init() -> compare");
-
-	glTexEnvi(GL_TEXTURE_FILTER_CONTROL, GL_TEXTURE_LOD_BIAS, tex.GetBias());
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_LOD, (tex.GetMinLOD() >> 8));
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LOD, (tex.GetMaxLOD() >> 8));
-
-	checkForGlError("GLTexture::Init() -> lod");
-
-	static const int gl_tex_min_filter[] =
-	{
-		GL_NEAREST, // unused
-		GL_NEAREST,
-		GL_LINEAR,
-		GL_NEAREST_MIPMAP_NEAREST,
-		GL_LINEAR_MIPMAP_NEAREST,
-		GL_NEAREST_MIPMAP_LINEAR,
-		GL_LINEAR_MIPMAP_LINEAR,
-		GL_NEAREST, // CELL_GCM_TEXTURE_CONVOLUTION_MIN
-	};
-
-	static const int gl_tex_mag_filter[] = {
-		GL_NEAREST, // unused
-		GL_NEAREST,
-		GL_LINEAR,
-		GL_NEAREST, // unused
-		GL_LINEAR  // CELL_GCM_TEXTURE_CONVOLUTION_MAG
-	};
-
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, gl_tex_min_filter[tex.GetMinFilter()]);
-
-	checkForGlError("GLTexture::Init() -> min filters");
-
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, gl_tex_mag_filter[tex.GetMagFilter()]);
-
-	checkForGlError("GLTexture::Init() -> mag filters");
-	glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, GetMaxAniso(tex.GetMaxAniso()));
-
-	checkForGlError("GLTexture::Init() -> max anisotropy");
-
-	//Unbind();
-
-	if (is_swizzled && format == CELL_GCM_TEXTURE_A8R8G8B8)
-	{
-		free(unswizzledPixels);
-	}
-}
-
-void GLTexture::Save(RSXTexture& tex, const std::string& name)
-{
-	if (!m_id || !tex.GetOffset() || !tex.GetWidth() || !tex.GetHeight()) return;
-
-	const u32 texPixelCount = tex.GetWidth() * tex.GetHeight();
-
-	u32* alldata = new u32[texPixelCount];
-
-	Bind();
-
-	switch (tex.GetFormat() & ~(0x20 | 0x40))
-	{
-	case CELL_GCM_TEXTURE_B8:
-		glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8, alldata);
-		break;
-
-	case CELL_GCM_TEXTURE_A8R8G8B8:
-		glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8_REV, alldata);
-		break;
-
-	default:
-		delete[] alldata;
-		return;
-	}
-
-	fs::file(name + ".raw", o_write | o_create | o_trunc).write(alldata, texPixelCount * 4);
-
-	u8* data = new u8[texPixelCount * 3];
-	u8* alpha = new u8[texPixelCount];
-
-	u8* src = (u8*)alldata;
-	u8* dst_d = data;
-	u8* dst_a = alpha;
-	for (u32 i = 0; i < texPixelCount; i++)
-	{
-		*dst_d++ = *src++;
-		*dst_d++ = *src++;
-		*dst_d++ = *src++;
-		*dst_a++ = *src++;
-	}
-
-	rImage out;
-	out.Create(tex.GetWidth(), tex.GetHeight(), data, alpha);
-	out.SaveFile(name, rBITMAP_TYPE_PNG);
-
-	delete[] alldata;
-	//free(data);
-	//free(alpha);
-}
-
-void GLTexture::Save(RSXTexture& tex)
-{
-	static const std::string& dir_path = "textures";
-	static const std::string& file_fmt = dir_path + "/" + "tex[%d].png";
-
-	if (!fs::exists(dir_path)) fs::create_dir(dir_path);
-
-	u32 count = 0;
-	while (fs::exists(fmt::Format(file_fmt.c_str(), count))) count++;
-	Save(tex, fmt::Format(file_fmt.c_str(), count));
-}
-
-void GLTexture::Bind()
-{
-	glBindTexture(GL_TEXTURE_2D, m_id);
-}
-
-void GLTexture::Unbind()
-{
-	glBindTexture(GL_TEXTURE_2D, 0);
-}
-
-void GLTexture::Delete()
-{
-	if (m_id)
-	{
-		glDeleteTextures(1, &m_id);
-		m_id = 0;
-	}
-}
-
-void PostDrawObj::Draw()
-{
-	static bool s_is_initialized = false;
-
-	if (!s_is_initialized)
-	{
-		s_is_initialized = true;
-		Initialize();
-	}
-	else
-	{
-		m_program.Use();
-	}
-}
-
-void PostDrawObj::Initialize()
-{
-	InitializeShaders();
-	m_fp.Compile();
-	m_vp.Compile();
-	m_program.Create(m_vp.id, m_fp.id);
-	m_program.Use();
-	InitializeLocations();
-}
-
-void DrawCursorObj::Draw()
-{
-	checkForGlError("PostDrawObj : Unknown error.");
-
-	PostDrawObj::Draw();
-	checkForGlError("PostDrawObj::Draw");
-
-	if (!m_fbo.IsCreated())
-	{
-		m_fbo.Create();
-		checkForGlError("DrawCursorObj : m_fbo.Create");
-		m_fbo.Bind();
-		checkForGlError("DrawCursorObj : m_fbo.Bind");
-
-		m_rbo.Create();
-		checkForGlError("DrawCursorObj : m_rbo.Create");
-		m_rbo.Bind();
-		checkForGlError("DrawCursorObj : m_rbo.Bind");
-		m_rbo.Storage(GL_RGBA, m_width, m_height);
-		checkForGlError("DrawCursorObj : m_rbo.Storage");
-
-		m_fbo.Renderbuffer(GL_COLOR_ATTACHMENT0, m_rbo.GetId());
-		checkForGlError("DrawCursorObj : m_fbo.Renderbuffer");
-	}
-
-	m_fbo.Bind();
-	checkForGlError("DrawCursorObj : m_fbo.Bind");
-	glDrawBuffer(GL_COLOR_ATTACHMENT0);
-	checkForGlError("DrawCursorObj : glDrawBuffer");
-
-	m_program.Use();
-	checkForGlError("DrawCursorObj : m_program.Use");
-
-	if (m_update_texture)
-	{
-		glUniform2f(m_program.GetLocation("in_tc"), m_width, m_height);
-		checkForGlError("DrawCursorObj : glUniform2f");
-		if (!m_tex_id)
-		{
-			glGenTextures(1, &m_tex_id);
-			checkForGlError("DrawCursorObj : glGenTextures");
-		}
-
-		glActiveTexture(GL_TEXTURE0);
-		checkForGlError("DrawCursorObj : glActiveTexture");
-		glBindTexture(GL_TEXTURE_2D, m_tex_id);
-		checkForGlError("DrawCursorObj : glBindTexture");
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, m_width, m_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, m_pixels);
-		checkForGlError("DrawCursorObj : glTexImage2D");
-		m_program.SetTex(0);
-	}
-
-	if (m_update_pos)
-	{
-		glUniform4f(m_program.GetLocation("in_pos"), m_pos_x, m_pos_y, m_pos_z, 1.0f);
-		checkForGlError("DrawCursorObj : glUniform4f");
-	}
-
-	glDrawArrays(GL_QUADS, 0, 4);
-	checkForGlError("DrawCursorObj : glDrawArrays");
-
-	m_fbo.Bind(GL_READ_FRAMEBUFFER);
-	checkForGlError("DrawCursorObj : m_fbo.Bind(GL_READ_FRAMEBUFFER)");
-	GLfbo::Bind(GL_DRAW_FRAMEBUFFER, 0);
-	checkForGlError("DrawCursorObj : GLfbo::Bind(GL_DRAW_FRAMEBUFFER, 0)");
-	GLfbo::Blit(0, 0, m_width, m_height, 0, 0, m_width, m_height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
-	checkForGlError("DrawCursorObj : GLfbo::Blit");
-	m_fbo.Bind();
-	checkForGlError("DrawCursorObj : m_fbo.Bind");
-}
-
-void DrawCursorObj::InitializeShaders()
-{
-	m_vp.shader =
-		"#version 420\n"
-		"\n"
-		"uniform vec4 in_pos;\n"
-		"uniform vec2 in_tc;\n"
-		"out vec2 tc;\n"
-		"\n"
-		"void main()\n"
-		"{\n"
-		"	tc = in_tc;\n"
-		"	gl_Position = in_pos;\n"
-		"}\n";
-
-	m_fp.shader = 
-		"#version 420\n"
-		"\n"
-		"in vec2 tc;\n"
-		"layout (binding = 0) uniform sampler2D tex0;\n"
-		"layout (location = 0) out vec4 res;\n"
-		"\n"
-		"void main()\n"
-		"{\n"
-		"	res = texture(tex0, tc);\n"
-		"}\n";
-}
-
-void DrawCursorObj::SetTexture(void* pixels, int width, int height)
-{
-	m_pixels = pixels;
-	m_width = width;
-	m_height = height;
-
-	m_update_texture = true;
-}
-
-void DrawCursorObj::SetPosition(float x, float y, float z)
-{
-	m_pos_x = x;
-	m_pos_y = y;
-	m_pos_z = z;
-	m_update_pos = true;
-}
-
-void DrawCursorObj::InitializeLocations()
-{
-	//LOG_WARNING(RSX, "tex0 location = 0x%x", m_program.GetLocation("tex0"));
-}
-
-GLGSRender::GLGSRender()
-	: GSRender()
-	, m_frame(nullptr)
-	, m_fp_buf_num(-1)
-	, m_vp_buf_num(-1)
-	, m_context(nullptr)
-{
-	m_frame = GetGSFrame();
-}
-
-GLGSRender::~GLGSRender()
-{
-	if (joinable())
-	{
-		throw EXCEPTION("Thread not joined");
-	}
-
-	m_frame->Close();
-	m_frame->DeleteContext(m_context);
-}
-
-void GLGSRender::Enable(bool enable, const u32 cap)
-{
-	if (enable)
+	if (condition)
 	{
 		glEnable(cap);
 	}
@@ -813,1385 +23,1324 @@ void GLGSRender::Enable(bool enable, const u32 cap)
 	{
 		glDisable(cap);
 	}
+
+	return condition;
+}
+
+u32 GLGSRender::enable(u32 condition, u32 cap, u32 index)
+{
+	if (condition)
+	{
+		glEnablei(cap, index);
+	}
+	else
+	{
+		glDisablei(cap, index);
+	}
+
+	return condition;
 }
 
 extern CellGcmContextData current_context;
 
-void GLGSRender::Close()
+void GLGSRender::begin()
 {
-	if (joinable())
+	rsx::thread::begin();
+
+	if (!load_program())
 	{
-		join();
-	}
-
-	if (m_frame->IsShown())
-	{
-		m_frame->Hide();
-	}
-	m_ctrl = nullptr;
-}
-
-void GLGSRender::EnableVertexData(bool indexed_draw)
-{
-	static u32 offset_list[m_vertex_count];
-	u32 cur_offset = 0;
-
-	const u32 data_offset = indexed_draw ? 0 : m_draw_array_first;
-
-	for (u32 i = 0; i < m_vertex_count; ++i)
-	{
-		if (0)
-		{
-			u32 data_format = methodRegisters[NV4097_SET_VERTEX_DATA_ARRAY_FORMAT + i * 4];
-			u16 frequency = data_format >> 16;
-			u8 stride = (data_format >> 8) & 0xff;
-			u8 size = (data_format >> 4) & 0xf;
-			u8 type = data_format & 0xf;
-
-			u32 type_size = 1;
-			switch (type)
-			{
-			case CELL_GCM_VERTEX_S1:    type_size = 2; break;
-			case CELL_GCM_VERTEX_F:     type_size = 4; break;
-			case CELL_GCM_VERTEX_SF:    type_size = 2; break;
-			case CELL_GCM_VERTEX_UB:    type_size = 1; break;
-			case CELL_GCM_VERTEX_S32K:  type_size = 2; break;
-			case CELL_GCM_VERTEX_CMP:   type_size = 4; break;
-			case CELL_GCM_VERTEX_UB256: type_size = 1; break;
-
-			default:
-				LOG_ERROR(RSX, "RSXVertexData::GetTypeSize: Bad vertex data type (%d)!", type);
-				break;
-			}
-
-			int item_size = size * type_size;
-		}
-
-		offset_list[i] = cur_offset;
-
-		if (!m_vertex_data[i].IsEnabled()) continue;
-		const size_t item_size = m_vertex_data[i].GetTypeSize() * m_vertex_data[i].size;
-		const size_t data_size = m_vertex_data[i].data.size() - data_offset * item_size;
-		const u32 pos = m_vdata.size();
-
-		cur_offset += data_size;
-		m_vdata.resize(m_vdata.size() + data_size);
-		memcpy(&m_vdata[pos], &m_vertex_data[i].data[data_offset * item_size], data_size);
-	}
-
-	m_vao.Create();
-	m_vao.Bind();
-	checkForGlError("initializing vao");
-
-	m_vbo.Create(indexed_draw ? 2 : 1);
-	m_vbo.Bind(0);
-	m_vbo.SetData(m_vdata.data(), m_vdata.size());
-
-	if (indexed_draw)
-	{
-		m_vbo.Bind(GL_ELEMENT_ARRAY_BUFFER, 1);
-		m_vbo.SetData(GL_ELEMENT_ARRAY_BUFFER, m_indexed_array.m_data.data(), m_indexed_array.m_data.size());
-	}
-
-	checkForGlError("initializing vbo");
-
-#if	DUMP_VERTEX_DATA
-	rFile dump("VertexDataArray.dump", rFile::write);
-#endif
-
-	for (u32 i = 0; i < m_vertex_count; ++i)
-	{
-		if (!m_vertex_data[i].IsEnabled()) continue;
-
-#if	DUMP_VERTEX_DATA
-		dump.Write(wxString::Format("VertexData[%d]:\n", i));
-		switch (m_vertex_data[i].type)
-		{
-		case CELL_GCM_VERTEX_S1:
-			for (u32 j = 0; j < m_vertex_data[i].data.size(); j += 2)
-			{
-				dump.Write(wxString::Format("%d\n", *(u16*)&m_vertex_data[i].data[j]));
-				if (!(((j + 2) / 2) % m_vertex_data[i].size)) dump.Write("\n");
-			}
-			break;
-
-		case CELL_GCM_VERTEX_F:
-			for (u32 j = 0; j < m_vertex_data[i].data.size(); j += 4)
-			{
-				dump.Write(wxString::Format("%.01f\n", *(float*)&m_vertex_data[i].data[j]));
-				if (!(((j + 4) / 4) % m_vertex_data[i].size)) dump.Write("\n");
-			}
-			break;
-
-		case CELL_GCM_VERTEX_SF:
-			for (u32 j = 0; j < m_vertex_data[i].data.size(); j += 2)
-			{
-				dump.Write(wxString::Format("%.01f\n", *(float*)&m_vertex_data[i].data[j]));
-				if (!(((j + 2) / 2) % m_vertex_data[i].size)) dump.Write("\n");
-			}
-			break;
-
-		case CELL_GCM_VERTEX_UB:
-			for (u32 j = 0; j < m_vertex_data[i].data.size(); ++j)
-			{
-				dump.Write(wxString::Format("%d\n", m_vertex_data[i].data[j]));
-				if (!((j + 1) % m_vertex_data[i].size)) dump.Write("\n");
-			}
-			break;
-
-		case CELL_GCM_VERTEX_S32K:
-			for (u32 j = 0; j < m_vertex_data[i].data.size(); j += 2)
-			{
-				dump.Write(wxString::Format("%d\n", *(u16*)&m_vertex_data[i].data[j]));
-				if (!(((j + 2) / 2) % m_vertex_data[i].size)) dump.Write("\n");
-			}
-			break;
-
-			// case CELL_GCM_VERTEX_CMP:
-
-		case CELL_GCM_VERTEX_UB256:
-			for (u32 j = 0; j < m_vertex_data[i].data.size(); ++j)
-			{
-				dump.Write(wxString::Format("%d\n", m_vertex_data[i].data[j]));
-				if (!((j + 1) % m_vertex_data[i].size)) dump.Write("\n");
-			}
-			break;
-
-		default:
-			LOG_ERROR(HLE, "Bad cv type! %d", m_vertex_data[i].type);
-			return;
-		}
-
-		dump.Write("\n");
-#endif
-
-		static const u32 gl_types[] =
-		{
-			GL_SHORT,
-			GL_FLOAT,
-			GL_HALF_FLOAT,
-			GL_UNSIGNED_BYTE,
-			GL_SHORT,
-			GL_FLOAT, // Needs conversion
-			GL_UNSIGNED_BYTE,
-		};
-
-		static const bool gl_normalized[] =
-		{
-			GL_TRUE,
-			GL_FALSE,
-			GL_FALSE,
-			GL_TRUE,
-			GL_FALSE,
-			GL_TRUE,
-			GL_FALSE,
-		};
-
-		if (m_vertex_data[i].type < 1 || m_vertex_data[i].type > 7)
-		{
-			LOG_ERROR(RSX, "GLGSRender::EnableVertexData: Bad vertex data type (%d)!", m_vertex_data[i].type);
-		}
-
-		if (!m_vertex_data[i].addr)
-		{
-			switch (m_vertex_data[i].type)
-			{
-			case CELL_GCM_VERTEX_S32K:
-			case CELL_GCM_VERTEX_S1:
-				switch(m_vertex_data[i].size)
-				{
-				case 1: glVertexAttrib1s(i, (GLshort&)m_vertex_data[i].data[0]); break;
-				case 2: glVertexAttrib2sv(i, (GLshort*)&m_vertex_data[i].data[0]); break;
-				case 3: glVertexAttrib3sv(i, (GLshort*)&m_vertex_data[i].data[0]); break;
-				case 4: glVertexAttrib4sv(i, (GLshort*)&m_vertex_data[i].data[0]); break;
-				}
-				break;
-
-			case CELL_GCM_VERTEX_F:
-				switch (m_vertex_data[i].size)
-				{
-				case 1: glVertexAttrib1f(i, (GLfloat&)m_vertex_data[i].data[0]); break;
-				case 2: glVertexAttrib2fv(i, (GLfloat*)&m_vertex_data[i].data[0]); break;
-				case 3: glVertexAttrib3fv(i, (GLfloat*)&m_vertex_data[i].data[0]); break;
-				case 4: glVertexAttrib4fv(i, (GLfloat*)&m_vertex_data[i].data[0]); break;
-				}
-				break;
-
-			case CELL_GCM_VERTEX_CMP:
-			case CELL_GCM_VERTEX_UB:
-				glVertexAttrib4ubv(i, (GLubyte*)&m_vertex_data[i].data[0]);
-				break;
-			}
-
-			checkForGlError("glVertexAttrib");
-		}
-		else
-		{
-			u32 gltype = gl_types[m_vertex_data[i].type - 1];
-			bool normalized = gl_normalized[m_vertex_data[i].type - 1];
-
-			glEnableVertexAttribArray(i);
-			checkForGlError("glEnableVertexAttribArray");
-			glVertexAttribPointer(i, m_vertex_data[i].size, gltype, normalized, 0, reinterpret_cast<void*>(offset_list[i]));
-			checkForGlError("glVertexAttribPointer");
-		}
-	}
-}
-
-void GLGSRender::DisableVertexData()
-{
-	m_vdata.clear();
-	for (u32 i = 0; i < m_vertex_count; ++i)
-	{
-		if (!m_vertex_data[i].IsEnabled()) continue;
-		glDisableVertexAttribArray(i);
-		checkForGlError("glDisableVertexAttribArray");
-	}
-	m_vao.Unbind();
-}
-
-void GLGSRender::InitVertexData()
-{
-	int l;
-	GLfloat scaleOffsetMat[16] =
-	{
-		1.0f, 0.0f, 0.0f, 0.0f,
-		0.0f, 1.0f, 0.0f, 0.0f,
-		0.0f, 0.0f, 1.0f, 0.0f,
-		0.0f, 0.0f, 0.0f, 1.0f
-	};
-
-	for (const RSXTransformConstant& c : m_transform_constants)
-	{
-		const std::string name = fmt::Format("vc[%u]", c.id);
-		l = m_program.GetLocation(name);
-		checkForGlError("glGetUniformLocation " + name);
-
-		glUniform4f(l, c.x, c.y, c.z, c.w);
-		checkForGlError("glUniform4f " + name + fmt::Format(" %d [%f %f %f %f]", l, c.x, c.y, c.z, c.w));
-	}
-
-	// Scale
-	scaleOffsetMat[0]  = (GLfloat&)methodRegisters[NV4097_SET_VIEWPORT_SCALE + (0x4 * 0)] / (RSXThread::m_width / RSXThread::m_width_scale);
-	scaleOffsetMat[5]  = (GLfloat&)methodRegisters[NV4097_SET_VIEWPORT_SCALE + (0x4 * 1)] / (RSXThread::m_height / RSXThread::m_height_scale);
-	scaleOffsetMat[10] = (GLfloat&)methodRegisters[NV4097_SET_VIEWPORT_SCALE + (0x4 * 2)];
-
-	// Offset
-	scaleOffsetMat[3]  = (GLfloat&)methodRegisters[NV4097_SET_VIEWPORT_OFFSET + (0x4 * 0)] - (RSXThread::m_width / RSXThread::m_width_scale);
-	scaleOffsetMat[7]  = (GLfloat&)methodRegisters[NV4097_SET_VIEWPORT_OFFSET + (0x4 * 1)] - (RSXThread::m_height / RSXThread::m_height_scale);
-	scaleOffsetMat[11] = (GLfloat&)methodRegisters[NV4097_SET_VIEWPORT_OFFSET + (0x4 * 2)] - 1 / 2.0f;
-
-	scaleOffsetMat[3] /= RSXThread::m_width / RSXThread::m_width_scale;
-	scaleOffsetMat[7] /= RSXThread::m_height / RSXThread::m_height_scale;
-
-	l = m_program.GetLocation("scaleOffsetMat");
-	glUniformMatrix4fv(l, 1, false, scaleOffsetMat);
-	checkForGlError("glUniformMatrix4fv");
-}
-
-void GLGSRender::InitFragmentData()
-{
-	if (!m_cur_fragment_prog)
-	{
-		LOG_ERROR(RSX, "InitFragmentData: m_cur_shader_prog == NULL");
+		//no program - no drawing
 		return;
 	}
 
-	// Get constant from fragment program
-	const std::vector<size_t> &fragmentOffset = m_prog_buffer.getFragmentConstantOffsetsCache(m_cur_fragment_prog);
-	for (size_t offsetInFP : fragmentOffset)
+	init_buffers();
+
+	u32 color_mask = rsx::method_registers[NV4097_SET_COLOR_MASK];
+	bool color_mask_b = color_mask & 0xff;
+	bool color_mask_g = (color_mask >> 8) & 0xff;
+	bool color_mask_r = (color_mask >> 16) & 0xff;
+	bool color_mask_a = (color_mask >> 24) & 0xff;
+
+	__glcheck glColorMask(color_mask_r, color_mask_g, color_mask_b, color_mask_a);
+	__glcheck glDepthMask(rsx::method_registers[NV4097_SET_DEPTH_MASK]);
+	__glcheck glStencilMask(rsx::method_registers[NV4097_SET_STENCIL_MASK]);
+
+	if (__glcheck enable(rsx::method_registers[NV4097_SET_DEPTH_TEST_ENABLE], GL_DEPTH_TEST))
 	{
-		auto data = vm::ptr<u32>::make(m_cur_fragment_prog->addr + (u32)offsetInFP);
-
-		u32 c0 = (data[0] >> 16 | data[0] << 16);
-		u32 c1 = (data[1] >> 16 | data[1] << 16);
-		u32 c2 = (data[2] >> 16 | data[2] << 16);
-		u32 c3 = (data[3] >> 16 | data[3] << 16);
-		const std::string name = fmt::Format("fc%u", offsetInFP);
-		const int l = m_program.GetLocation(name);
-		checkForGlError("glGetUniformLocation " + name);
-
-		float f0 = (float&)c0;
-		float f1 = (float&)c1;
-		float f2 = (float&)c2;
-		float f3 = (float&)c3;
-		glUniform4f(l, f0, f1, f2, f3);
-		checkForGlError("glUniform4f " + name + fmt::Format(" %u [%f %f %f %f]", l, f0, f1, f2, f3));
+		__glcheck glDepthFunc(rsx::method_registers[NV4097_SET_DEPTH_FUNC]);
+		__glcheck glDepthMask(rsx::method_registers[NV4097_SET_DEPTH_MASK]);
 	}
 
-	for (const RSXTransformConstant& c : m_fragment_constants)
+	if (glDepthBoundsEXT && (__glcheck enable(rsx::method_registers[NV4097_SET_DEPTH_BOUNDS_TEST_ENABLE], GL_DEPTH_BOUNDS_TEST_EXT)))
 	{
-		u32 id = c.id - m_cur_fragment_prog->offset;
-
-		//LOG_WARNING(RSX,"fc%u[0x%x - 0x%x] = (%f, %f, %f, %f)", id, c.id, m_cur_shader_prog->offset, c.x, c.y, c.z, c.w);
-
-		const std::string name = fmt::Format("fc%u", id);
-		const int l = m_program.GetLocation(name);
-		checkForGlError("glGetUniformLocation " + name);
-
-		glUniform4f(l, c.x, c.y, c.z, c.w);
-		checkForGlError("glUniform4f " + name + fmt::Format(" %u [%f %f %f %f]", l, c.x, c.y, c.z, c.w));
+		__glcheck glDepthBoundsEXT((f32&)rsx::method_registers[NV4097_SET_DEPTH_BOUNDS_MIN], (f32&)rsx::method_registers[NV4097_SET_DEPTH_BOUNDS_MAX]);
 	}
 
+	__glcheck glDepthRange((f32&)rsx::method_registers[NV4097_SET_CLIP_MIN], (f32&)rsx::method_registers[NV4097_SET_CLIP_MAX]);
+	__glcheck enable(rsx::method_registers[NV4097_SET_DITHER_ENABLE], GL_DITHER);
 
-	//if (m_fragment_constants.GetCount())
-	//	LOG_NOTICE(HLE, "");
+	if (__glcheck enable(rsx::method_registers[NV4097_SET_ALPHA_TEST_ENABLE], GL_ALPHA_TEST))
+	{
+		//TODO: NV4097_SET_ALPHA_REF must be converted to f32
+		//glcheck(glAlphaFunc(rsx::method_registers[NV4097_SET_ALPHA_FUNC], rsx::method_registers[NV4097_SET_ALPHA_REF]));
+	}
+
+	if (__glcheck enable(rsx::method_registers[NV4097_SET_BLEND_ENABLE], GL_BLEND))
+	{
+		u32 sfactor = rsx::method_registers[NV4097_SET_BLEND_FUNC_SFACTOR];
+		u32 dfactor = rsx::method_registers[NV4097_SET_BLEND_FUNC_DFACTOR];
+		u16 sfactor_rgb = sfactor;
+		u16 sfactor_a = sfactor >> 16;
+		u16 dfactor_rgb = dfactor;
+		u16 dfactor_a = dfactor >> 16;
+
+		__glcheck glBlendFuncSeparate(sfactor_rgb, dfactor_rgb, sfactor_a, dfactor_a);
+
+		if (m_surface.color_format == CELL_GCM_SURFACE_F_W16Z16Y16X16) //TODO: check another color formats
+		{
+			u32 blend_color = rsx::method_registers[NV4097_SET_BLEND_COLOR];
+			u32 blend_color2 = rsx::method_registers[NV4097_SET_BLEND_COLOR2];
+
+			u16 blend_color_r = blend_color;
+			u16 blend_color_g = blend_color >> 16;
+			u16 blend_color_b = blend_color2;
+			u16 blend_color_a = blend_color2 >> 16;
+
+			__glcheck glBlendColor(blend_color_r / 65535.f, blend_color_g / 65535.f, blend_color_b / 65535.f, blend_color_a / 65535.f);
+		}
+		else
+		{
+			u32 blend_color = rsx::method_registers[NV4097_SET_BLEND_COLOR];
+			u8 blend_color_r = blend_color;
+			u8 blend_color_g = blend_color >> 8;
+			u8 blend_color_b = blend_color >> 16;
+			u8 blend_color_a = blend_color >> 24;
+
+			__glcheck glBlendColor(blend_color_r / 255.f, blend_color_g / 255.f, blend_color_b / 255.f, blend_color_a / 255.f);
+		}
+
+		u32 equation = rsx::method_registers[NV4097_SET_BLEND_EQUATION];
+		u16 equation_rgb = equation;
+		u16 equation_a = equation >> 16;
+
+		__glcheck glBlendEquationSeparate(equation_rgb, equation_a);
+	}
+	
+	if (__glcheck enable(rsx::method_registers[NV4097_SET_STENCIL_TEST_ENABLE], GL_STENCIL_TEST))
+	{
+		__glcheck glStencilFunc(rsx::method_registers[NV4097_SET_STENCIL_FUNC], rsx::method_registers[NV4097_SET_STENCIL_FUNC_REF],
+			rsx::method_registers[NV4097_SET_STENCIL_FUNC_MASK]);
+		__glcheck glStencilOp(rsx::method_registers[NV4097_SET_STENCIL_OP_FAIL], rsx::method_registers[NV4097_SET_STENCIL_OP_ZFAIL],
+			rsx::method_registers[NV4097_SET_STENCIL_OP_ZPASS]);
+
+		if (rsx::method_registers[NV4097_SET_TWO_SIDED_STENCIL_TEST_ENABLE]) {
+			__glcheck glStencilMaskSeparate(GL_BACK, rsx::method_registers[NV4097_SET_BACK_STENCIL_MASK]);
+			__glcheck glStencilFuncSeparate(GL_BACK, rsx::method_registers[NV4097_SET_BACK_STENCIL_FUNC],
+				rsx::method_registers[NV4097_SET_BACK_STENCIL_FUNC_REF], rsx::method_registers[NV4097_SET_BACK_STENCIL_FUNC_MASK]);
+			__glcheck glStencilOpSeparate(GL_BACK, rsx::method_registers[NV4097_SET_BACK_STENCIL_OP_FAIL],
+				rsx::method_registers[NV4097_SET_BACK_STENCIL_OP_ZFAIL], rsx::method_registers[NV4097_SET_BACK_STENCIL_OP_ZPASS]);
+		}
+	}
+
+	__glcheck glShadeModel(rsx::method_registers[NV4097_SET_SHADE_MODE]);
+
+	if (u32 blend_mrt = rsx::method_registers[NV4097_SET_BLEND_ENABLE_MRT])
+	{
+		__glcheck enable(blend_mrt & 2, GL_BLEND, GL_COLOR_ATTACHMENT1);
+		__glcheck enable(blend_mrt & 4, GL_BLEND, GL_COLOR_ATTACHMENT2);
+		__glcheck enable(blend_mrt & 8, GL_BLEND, GL_COLOR_ATTACHMENT3);
+	}
+	
+	if (__glcheck enable(rsx::method_registers[NV4097_SET_LOGIC_OP_ENABLE], GL_LOGIC_OP))
+	{
+		__glcheck glLogicOp(rsx::method_registers[NV4097_SET_LOGIC_OP]);
+	}
+
+	u32 line_width = rsx::method_registers[NV4097_SET_LINE_WIDTH];
+	__glcheck glLineWidth((line_width >> 3) + (line_width & 7) / 8.f);
+	__glcheck enable(rsx::method_registers[NV4097_SET_LINE_SMOOTH_ENABLE], GL_LINE_SMOOTH);
+
+	//TODO
+	//NV4097_SET_ANISO_SPREAD
+
+	//TODO
+	/*
+	glcheck(glFogi(GL_FOG_MODE, rsx::method_registers[NV4097_SET_FOG_MODE]));
+	f32 fog_p0 = (f32&)rsx::method_registers[NV4097_SET_FOG_PARAMS + 0];
+	f32 fog_p1 = (f32&)rsx::method_registers[NV4097_SET_FOG_PARAMS + 1];
+
+	f32 fog_start = (2 * fog_p0 - (fog_p0 - 2) / fog_p1) / (fog_p0 - 1);
+	f32 fog_end = (2 * fog_p0 - 1 / fog_p1) / (fog_p0 - 1);
+
+	glFogf(GL_FOG_START, fog_start);
+	glFogf(GL_FOG_END, fog_end);
+	*/
+	//NV4097_SET_FOG_PARAMS
+
+	__glcheck enable(rsx::method_registers[NV4097_SET_POLY_OFFSET_POINT_ENABLE], GL_POLYGON_OFFSET_POINT);
+	__glcheck enable(rsx::method_registers[NV4097_SET_POLY_OFFSET_LINE_ENABLE], GL_POLYGON_OFFSET_LINE);
+	__glcheck enable(rsx::method_registers[NV4097_SET_POLY_OFFSET_FILL_ENABLE], GL_POLYGON_OFFSET_FILL);
+
+	__glcheck glPolygonOffset((f32&)rsx::method_registers[NV4097_SET_POLYGON_OFFSET_SCALE_FACTOR],
+		(f32&)rsx::method_registers[NV4097_SET_POLYGON_OFFSET_BIAS]);
+
+	//NV4097_SET_SPECULAR_ENABLE
+	//NV4097_SET_TWO_SIDE_LIGHT_EN
+	//NV4097_SET_FLAT_SHADE_OP
+	//NV4097_SET_EDGE_FLAG
+
+	u32 clip_plane_control = rsx::method_registers[NV4097_SET_USER_CLIP_PLANE_CONTROL];
+	u8 clip_plane_0 = clip_plane_control & 0xf;
+	u8 clip_plane_1 = (clip_plane_control >> 4) & 0xf;
+	u8 clip_plane_2 = (clip_plane_control >> 8) & 0xf;
+	u8 clip_plane_3 = (clip_plane_control >> 12) & 0xf;
+	u8 clip_plane_4 = (clip_plane_control >> 16) & 0xf;
+	u8 clip_plane_5 = (clip_plane_control >> 20) & 0xf;
+
+	//TODO
+	if (__glcheck enable(clip_plane_0, GL_CLIP_DISTANCE0)) {}
+	if (__glcheck enable(clip_plane_1, GL_CLIP_DISTANCE1)) {}
+	if (__glcheck enable(clip_plane_2, GL_CLIP_DISTANCE2)) {}
+	if (__glcheck enable(clip_plane_3, GL_CLIP_DISTANCE3)) {}
+	if (__glcheck enable(clip_plane_4, GL_CLIP_DISTANCE4)) {}
+	if (__glcheck enable(clip_plane_5, GL_CLIP_DISTANCE5)) {}
+
+	__glcheck enable(rsx::method_registers[NV4097_SET_POLY_OFFSET_FILL_ENABLE], GL_POLYGON_OFFSET_FILL);
+
+	if (__glcheck enable(rsx::method_registers[NV4097_SET_POLYGON_STIPPLE], GL_POLYGON_STIPPLE))
+	{
+		__glcheck glPolygonStipple((GLubyte*)(rsx::method_registers + NV4097_SET_POLYGON_STIPPLE_PATTERN));
+	}
+
+	__glcheck glPolygonMode(GL_FRONT, rsx::method_registers[NV4097_SET_FRONT_POLYGON_MODE]);
+	__glcheck glPolygonMode(GL_BACK, rsx::method_registers[NV4097_SET_BACK_POLYGON_MODE]);
+
+	if (__glcheck enable(rsx::method_registers[NV4097_SET_CULL_FACE_ENABLE], GL_CULL_FACE))
+	{
+		__glcheck glCullFace(rsx::method_registers[NV4097_SET_CULL_FACE]);
+	}
+
+	__glcheck glFrontFace(rsx::method_registers[NV4097_SET_FRONT_FACE] ^ 1);
+
+	__glcheck enable(rsx::method_registers[NV4097_SET_POLY_SMOOTH_ENABLE], GL_POLYGON_SMOOTH);
+
+	//NV4097_SET_COLOR_KEY_COLOR
+	//NV4097_SET_SHADER_CONTROL
+	//NV4097_SET_ZMIN_MAX_CONTROL
+	//NV4097_SET_ANTI_ALIASING_CONTROL
+	//NV4097_SET_CLIP_ID_TEST_ENABLE
+
+	if (__glcheck enable(rsx::method_registers[NV4097_SET_RESTART_INDEX_ENABLE], GL_PRIMITIVE_RESTART))
+	{
+		__glcheck glPrimitiveRestartIndex(rsx::method_registers[NV4097_SET_RESTART_INDEX]);
+	}
+
+	if (__glcheck enable(rsx::method_registers[NV4097_SET_LINE_STIPPLE], GL_LINE_STIPPLE))
+	{
+		u32 line_stipple_pattern = rsx::method_registers[NV4097_SET_LINE_STIPPLE_PATTERN];
+		u16 factor = line_stipple_pattern;
+		u16 pattern = line_stipple_pattern >> 16;
+		__glcheck glLineStipple(factor, pattern);
+	}
 }
 
-bool GLGSRender::LoadProgram()
+template<typename T, int count>
+struct apply_attrib_t;
+
+template<typename T>
+struct apply_attrib_t<T, 1>
 {
-	if (!m_cur_fragment_prog)
+	static void func(gl::glsl::program& program, int location, const T* data)
 	{
-		LOG_WARNING(RSX, "LoadProgram: m_cur_shader_prog == NULL");
+		program.attribs[location] = data[0];
+	}
+};
+
+template<typename T>
+struct apply_attrib_t<T, 2>
+{
+	static void func(gl::glsl::program& program, int location, const T* data)
+	{
+		program.attribs[location] = color2_base<T>{ data[0], data[1] };
+	}
+};
+
+template<typename T>
+struct apply_attrib_t<T, 3>
+{
+	static void func(gl::glsl::program& program, int location, const T* data)
+	{
+		program.attribs[location] = color3_base<T>{ data[0], data[1], data[2] };
+	}
+};
+template<typename T>
+struct apply_attrib_t<T, 4>
+{
+	static void func(gl::glsl::program& program, int location, const T* data)
+	{
+		program.attribs[location] = color4_base<T>{ data[0], data[1], data[2], data[3] };
+	}
+};
+
+
+template<typename T, int count>
+void apply_attrib_array(gl::glsl::program& program, int location, const std::vector<u8>& data)
+{
+	for (size_t offset = 0; offset < data.size(); offset += count * sizeof(T))
+	{
+		apply_attrib_t<T, count>::func(program, location, (T*)(data.data() + offset));
+	}
+}
+
+namespace
+{
+	gl::buffer_pointer::type gl_types(Vertex_base_type type)
+	{
+		switch (type)
+		{
+			case Vertex_base_type::s1: return gl::buffer_pointer::type::s16;
+			case Vertex_base_type::f: return gl::buffer_pointer::type::f32;
+			case Vertex_base_type::sf: return gl::buffer_pointer::type::f16;
+			case Vertex_base_type::ub: return gl::buffer_pointer::type::u8;
+			case Vertex_base_type::s32k: return gl::buffer_pointer::type::s32;
+			case Vertex_base_type::cmp: return gl::buffer_pointer::type::s16; // Needs conversion
+			case Vertex_base_type::ub256: gl::buffer_pointer::type::u8;
+		}
+	}
+
+	bool gl_normalized(Vertex_base_type type)
+	{
+		switch (type)
+		{
+		case Vertex_base_type::s1:
+		case Vertex_base_type::ub:
+		case Vertex_base_type::cmp:
+			return true;
+		case Vertex_base_type::f:
+		case Vertex_base_type::sf:
+		case Vertex_base_type::ub256:
+		case Vertex_base_type::s32k:
+			return false;
+		}
+	}
+}
+
+void GLGSRender::end()
+{
+	if (!draw_fbo || !vertex_draw_count)
+	{
+		rsx::thread::end();
+		return;
+	}
+
+	//LOG_NOTICE(Log::RSX, "draw()");
+
+	draw_fbo.bind();
+	m_program->use();
+
+	//setup textures
+	for (int i = 0; i < rsx::limits::textures_count; ++i)
+	{
+		if (!textures[i].enabled())
+		{
+			continue;
+		}
+
+		int location;
+		if (m_program->uniforms.has_location("tex" + std::to_string(i), &location))
+		{
+			__glcheck m_gl_textures[i].init(i, textures[i]);
+			glProgramUniform1i(m_program->id(), location, i);
+		}
+	}
+
+	//initialize vertex attributes
+
+
+
+
+	//merge all vertex arrays
+	std::vector<u8> vertex_arrays_data;
+	size_t vertex_arrays_offsets[rsx::limits::vertex_count];
+
+	const std::string reg_table[] =
+	{
+		"in_pos", "in_weight", "in_normal",
+		"in_diff_color", "in_spec_color",
+		"in_fog",
+		"in_point_size", "in_7",
+		"in_tc0", "in_tc1", "in_tc2", "in_tc3",
+		"in_tc4", "in_tc5", "in_tc6", "in_tc7"
+	};
+
+	u32 input_mask = rsx::method_registers[NV4097_SET_VERTEX_ATTRIB_INPUT_MASK];
+	m_vao.bind();
+
+	if (draw_command == Draw_command::draw_command_inlined_array)
+	{
+		write_inline_array_to_buffer(vertex_arrays_data.data());
+		size_t offset = 0;
+		for (int index = 0; index < rsx::limits::vertex_count; ++index)
+		{
+			auto &vertex_info = vertex_arrays_info[index];
+
+			if (!vertex_info.size) // disabled
+				continue;
+
+			int location;
+			if (!m_program->attribs.has_location(reg_table[index], &location))
+				continue;
+
+			__glcheck m_program->attribs[location] =
+				(m_vao + offset)
+				.config(gl_types(vertex_info.type), vertex_info.size, gl_normalized(vertex_info.type));
+			offset += rsx::get_vertex_type_size_on_host(vertex_info.type, vertex_info.size);
+		}
+	}
+	else
+	{
+		for (int index = 0; index < rsx::limits::vertex_count; ++index)
+		{
+			bool enabled = !!(input_mask & (1 << index));
+			if (!enabled)
+				continue;
+
+			int location;
+			if (!m_program->attribs.has_location(reg_table[index], &location))
+				continue;
+
+			if (vertex_arrays_info[index].size > 0)
+			{
+				auto &vertex_info = vertex_arrays_info[index];
+				// Active vertex array
+
+				size_t position = vertex_arrays_data.size();
+				vertex_arrays_offsets[index] = position;
+
+				if (vertex_arrays[index].empty())
+					continue;
+
+				size_t size = vertex_arrays[index].size();
+				vertex_arrays_data.resize(position + size);
+
+				memcpy(vertex_arrays_data.data() + position, vertex_arrays[index].data(), size);
+
+				__glcheck m_program->attribs[location] =
+					(m_vao + vertex_arrays_offsets[index])
+					.config(gl_types(vertex_info.type), vertex_info.size, gl_normalized(vertex_info.type));
+			}
+			else if (register_vertex_info[index].size > 0)
+			{
+				auto &vertex_data = register_vertex_data[index];
+				auto &vertex_info = register_vertex_info[index];
+
+				switch (vertex_info.type)
+				{
+				case Vertex_base_type::f:
+					switch (register_vertex_info[index].size)
+					{
+					case 1: apply_attrib_array<f32, 1>(*m_program, location, vertex_data); break;
+					case 2: apply_attrib_array<f32, 2>(*m_program, location, vertex_data); break;
+					case 3: apply_attrib_array<f32, 3>(*m_program, location, vertex_data); break;
+					case 4: apply_attrib_array<f32, 4>(*m_program, location, vertex_data); break;
+					}
+					break;
+
+				default:
+					LOG_ERROR(RSX, "bad non array vertex data format (type = %d, size = %d)", vertex_info.type, vertex_info.size);
+					break;
+				}
+			}
+		}
+	}
+	m_vbo.data(vertex_arrays_data.size(), vertex_arrays_data.data());
+
+	if (vertex_index_array.empty())
+	{
+		draw_fbo.draw_arrays(gl::draw_mode(draw_mode - 1), vertex_draw_count);
+	}
+	else
+	{
+		m_ebo.data(vertex_index_array.size(), vertex_index_array.data());
+
+		u32 indexed_type = rsx::method_registers[NV4097_SET_INDEX_ARRAY_DMA] >> 4;
+
+		__glcheck glDrawElements(draw_mode - 1, vertex_draw_count,
+			(indexed_type == CELL_GCM_DRAW_INDEX_ARRAY_TYPE_32 ? GL_UNSIGNED_INT : GL_UNSIGNED_SHORT), nullptr);
+	}
+
+	write_buffers();
+
+	rsx::thread::end();
+}
+
+void GLGSRender::set_viewport()
+{
+	u32 viewport_horizontal = rsx::method_registers[NV4097_SET_VIEWPORT_HORIZONTAL];
+	u32 viewport_vertical = rsx::method_registers[NV4097_SET_VIEWPORT_VERTICAL];
+
+	u16 viewport_x = viewport_horizontal & 0xffff;
+	u16 viewport_y = viewport_vertical & 0xffff;
+	u16 viewport_w = viewport_horizontal >> 16;
+	u16 viewport_h = viewport_vertical >> 16;
+
+	u32 scissor_horizontal = rsx::method_registers[NV4097_SET_SCISSOR_HORIZONTAL];
+	u32 scissor_vertical = rsx::method_registers[NV4097_SET_SCISSOR_VERTICAL];
+	u16 scissor_x = scissor_horizontal;
+	u16 scissor_w = scissor_horizontal >> 16;
+	u16 scissor_y = scissor_vertical;
+	u16 scissor_h = scissor_vertical >> 16;
+
+	u32 shader_window = rsx::method_registers[NV4097_SET_SHADER_WINDOW];
+
+	u8 shader_window_origin = (shader_window >> 12) & 0xf;
+
+	//TODO
+	if (true || shader_window_origin == CELL_GCM_WINDOW_ORIGIN_BOTTOM)
+	{
+		__glcheck glViewport(viewport_x, viewport_y, viewport_w, viewport_h);
+		__glcheck glScissor(scissor_x, scissor_y, scissor_w, scissor_h);
+	}
+	else
+	{
+		u16 shader_window_height = shader_window & 0xfff;
+
+		__glcheck glViewport(viewport_x, shader_window_height - viewport_y - viewport_h - 1, viewport_w, viewport_h);
+		__glcheck glScissor(scissor_x, shader_window_height - scissor_y - scissor_h - 1, scissor_w, scissor_h);
+	}
+
+	glEnable(GL_SCISSOR_TEST);
+}
+
+void GLGSRender::on_init_thread()
+{
+	GSRender::on_init_thread();
+
+	gl::init();
+	LOG_NOTICE(Log::RSX, (const char*)glGetString(GL_VERSION));
+	LOG_NOTICE(Log::RSX, (const char*)glGetString(GL_SHADING_LANGUAGE_VERSION));
+	LOG_NOTICE(Log::RSX, (const char*)glGetString(GL_VENDOR));
+
+	glEnable(GL_VERTEX_PROGRAM_POINT_SIZE);
+	m_vao.create();
+	m_vbo.create();
+	m_ebo.create();
+	m_scale_offset_buffer.create(16 * sizeof(float));
+	m_vertex_constants_buffer.create(512 * 4 * sizeof(float));
+	m_fragment_constants_buffer.create();
+
+	glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_scale_offset_buffer.id());
+	glBindBufferBase(GL_UNIFORM_BUFFER, 1, m_vertex_constants_buffer.id());
+	glBindBufferBase(GL_UNIFORM_BUFFER, 2, m_fragment_constants_buffer.id());
+
+	m_vao.array_buffer = m_vbo;
+	m_vao.element_array_buffer = m_ebo;
+}
+
+void GLGSRender::on_exit()
+{
+	glDisable(GL_VERTEX_PROGRAM_POINT_SIZE);
+
+	//if (m_program)
+	//	m_program.remove();
+
+	if (draw_fbo)
+		draw_fbo.remove();
+
+	for (auto &tex : m_draw_tex_color)
+		if (tex) tex.remove();
+
+	if (m_draw_tex_depth_stencil)
+		m_draw_tex_depth_stencil.remove();
+
+	if (m_flip_fbo)
+		m_flip_fbo.remove();
+
+	if (m_flip_tex_color)
+		m_flip_tex_color.remove();
+
+	if (m_vbo)
+		m_vbo.remove();
+
+	if (m_ebo)
+		m_ebo.remove();
+
+	if (m_vao)
+		m_vao.remove();
+
+	if (m_scale_offset_buffer)
+		m_scale_offset_buffer.remove();
+
+	if (m_vertex_constants_buffer)
+		m_vertex_constants_buffer.remove();
+
+	if (m_fragment_constants_buffer)
+		m_fragment_constants_buffer.remove();
+
+	m_prog_buffer.clear();
+}
+
+void nv4097_clear_surface(u32 arg, GLGSRender* renderer)
+{
+	//LOG_NOTICE(Log::RSX, "nv4097_clear_surface(0x%x)", arg);
+
+	if ((arg & 0xf3) == 0)
+	{
+		//do nothing
+		return;
+	}
+
+	/*
+	u16 clear_x = rsx::method_registers[NV4097_SET_CLEAR_RECT_HORIZONTAL];
+	u16 clear_y = rsx::method_registers[NV4097_SET_CLEAR_RECT_VERTICAL];
+	u16 clear_w = rsx::method_registers[NV4097_SET_CLEAR_RECT_HORIZONTAL] >> 16;
+	u16 clear_h = rsx::method_registers[NV4097_SET_CLEAR_RECT_VERTICAL] >> 16;
+	glScissor(clear_x, clear_y, clear_w, clear_h);
+	*/
+
+	renderer->init_buffers(true);
+	renderer->draw_fbo.bind();
+
+	GLbitfield mask = 0;
+
+	if (arg & 0x1)
+	{
+		u32 surface_depth_format = (rsx::method_registers[NV4097_SET_SURFACE_FORMAT] >> 5) & 0x7;
+		u32 max_depth_value = surface_depth_format == CELL_GCM_SURFACE_Z16 ? 0x0000ffff : 0x00ffffff;
+
+		u32 clear_depth = rsx::method_registers[NV4097_SET_ZSTENCIL_CLEAR_VALUE] >> 8;
+
+		glDepthMask(GL_TRUE);
+		glClearDepth(double(clear_depth) / max_depth_value);
+		mask |= GLenum(gl::buffers::depth);
+	}
+
+	if (arg & 0x2)
+	{
+		u8 clear_stencil = rsx::method_registers[NV4097_SET_ZSTENCIL_CLEAR_VALUE] & 0xff;
+
+		__glcheck glStencilMask(rsx::method_registers[NV4097_SET_STENCIL_MASK]);
+		glClearStencil(clear_stencil);
+
+		mask |= GLenum(gl::buffers::stencil);
+	}
+
+	if (arg & 0xf0)
+	{
+		u32 clear_color = rsx::method_registers[NV4097_SET_COLOR_CLEAR_VALUE];
+		u8 clear_a = clear_color >> 24;
+		u8 clear_r = clear_color >> 16;
+		u8 clear_g = clear_color >> 8;
+		u8 clear_b = clear_color;
+
+		glColorMask(((arg & 0x20) ? 1 : 0), ((arg & 0x40) ? 1 : 0), ((arg & 0x80) ? 1 : 0), ((arg & 0x10) ? 1 : 0));
+		glClearColor(clear_r / 255.f, clear_g / 255.f, clear_b / 255.f, clear_a / 255.f);
+
+		mask |= GLenum(gl::buffers::color);
+	}
+
+	glClear(mask);
+	renderer->write_buffers();
+}
+
+using rsx_method_impl_t = void(*)(u32, GLGSRender*);
+
+static const std::unordered_map<u32, rsx_method_impl_t> g_gl_method_tbl =
+{
+	{ NV4097_CLEAR_SURFACE, nv4097_clear_surface }
+};
+
+bool GLGSRender::do_method(u32 cmd, u32 arg)
+{
+	auto found = g_gl_method_tbl.find(cmd);
+
+	if (found == g_gl_method_tbl.end())
+	{
 		return false;
 	}
 
-	m_cur_fragment_prog->ctrl = m_shader_ctrl;
+	found->second(arg, this);
+	return true;
+}
 
-	if (!m_cur_vertex_prog)
+bool GLGSRender::load_program()
+{
+#if 1
+	RSXVertexProgram vertex_program;
+	u32 transform_program_start = rsx::method_registers[NV4097_SET_TRANSFORM_PROGRAM_START];
+	vertex_program.data.reserve((512 - transform_program_start) * 4);
+
+	for (int i = transform_program_start; i < 512; ++i)
 	{
-		LOG_WARNING(RSX, "LoadProgram: m_cur_vertex_prog == NULL");
-		return false;
+		vertex_program.data.resize((i - transform_program_start) * 4 + 4);
+		memcpy(vertex_program.data.data() + (i - transform_program_start) * 4, transform_program + i * 4, 4 * sizeof(u32));
+
+		D3 d3;
+		d3.HEX = transform_program[i * 4 + 3];
+
+		if (d3.end)
+			break;
 	}
 
-	GLProgram *result = m_prog_buffer.getGraphicPipelineState(m_cur_vertex_prog, m_cur_fragment_prog, nullptr, nullptr);
-	m_program.id = result->id;
-	m_program.Use();
+	RSXFragmentProgram fragment_program;
+	u32 shader_program = rsx::method_registers[NV4097_SET_SHADER_PROGRAM];
+	fragment_program.offset = shader_program & ~0x3;
+	fragment_program.addr = rsx::get_address(fragment_program.offset, (shader_program & 0x3) - 1);
+	fragment_program.ctrl = rsx::method_registers[NV4097_SET_SHADER_CONTROL];
+
+	for (u32 i = 0; i < rsx::limits::textures_count; ++i)
+	{
+		if (!textures[i].enabled())
+			fragment_program.texture_dimensions.push_back(texture_dimension::texture_dimension_2d);
+		else if (textures[i].cubemap())
+			fragment_program.texture_dimensions.push_back(texture_dimension::texture_dimension_cubemap);
+		else
+			fragment_program.texture_dimensions.push_back(texture_dimension::texture_dimension_2d);
+	}
+
+	__glcheck m_program = m_prog_buffer.getGraphicPipelineState(&vertex_program, &fragment_program, nullptr, nullptr);
+	__glcheck m_program->use();
+
+#else
+	std::vector<u32> vertex_program;
+	u32 transform_program_start = rsx::method_registers[NV4097_SET_TRANSFORM_PROGRAM_START];
+	vertex_program.reserve((512 - transform_program_start) * 4);
+
+	for (int i = transform_program_start; i < 512; ++i)
+	{
+		vertex_program.resize((i - transform_program_start) * 4 + 4);
+		memcpy(vertex_program.data() + (i - transform_program_start) * 4, transform_program + i * 4, 4 * sizeof(u32));
+
+		D3 d3;
+		d3.HEX = transform_program[i * 4 + 3];
+
+		if (d3.end)
+			break;
+	}
+
+	u32 shader_program = rsx::method_registers[NV4097_SET_SHADER_PROGRAM];
+
+	std::string fp_shader; ParamArray fp_parr; u32 fp_size;
+	GLFragmentDecompilerThread decompile_fp(fp_shader, fp_parr,
+		rsx::get_address(shader_program & ~0x3, (shader_program & 0x3) - 1), fp_size, rsx::method_registers[NV4097_SET_SHADER_CONTROL]);
+
+	std::string vp_shader; ParamArray vp_parr;
+	GLVertexDecompilerThread decompile_vp(vertex_program, vp_shader, vp_parr);
+	decompile_fp.Task();
+	decompile_vp.Task();
+
+	LOG_NOTICE(RSX, "fp: %s", fp_shader.c_str());
+	LOG_NOTICE(RSX, "vp: %s", vp_shader.c_str());
+
+	static bool first = true;
+	gl::glsl::shader fp(gl::glsl::shader::type::fragment, fp_shader);
+	gl::glsl::shader vp(gl::glsl::shader::type::vertex, vp_shader);
+
+	(m_program.recreate() += { fp.compile(), vp.compile() }).make();
+#endif
+	glBindBuffer(GL_UNIFORM_BUFFER, m_scale_offset_buffer.id());
+
+	void *buffer = glMapBuffer(GL_UNIFORM_BUFFER, GL_WRITE_ONLY);
+	fill_scale_offset_data(buffer, false);
+	glUnmapBuffer(GL_UNIFORM_BUFFER);
+
+	glBindBuffer(GL_UNIFORM_BUFFER, m_vertex_constants_buffer.id());
+	buffer = glMapBuffer(GL_UNIFORM_BUFFER, GL_WRITE_ONLY);
+	fill_vertex_program_constants_data(buffer);
+	glUnmapBuffer(GL_UNIFORM_BUFFER);
+
+	glBindBuffer(GL_UNIFORM_BUFFER, m_fragment_constants_buffer.id());
+	size_t buffer_size = m_prog_buffer.get_fragment_constants_buffer_size(&fragment_program);
+	glBufferData(GL_UNIFORM_BUFFER, buffer_size, nullptr, GL_STATIC_DRAW);
+	buffer = glMapBuffer(GL_UNIFORM_BUFFER, GL_WRITE_ONLY);
+	m_prog_buffer.fill_fragment_constans_buffer(buffer, &fragment_program);
+	glUnmapBuffer(GL_UNIFORM_BUFFER);
 
 	return true;
 }
 
-void GLGSRender::WriteBuffers()
+struct color_swizzle
 {
-	if (Ini.GSDumpDepthBuffer.GetValue())
-	{
-		glBindBuffer(GL_PIXEL_PACK_BUFFER, g_pbo[4]);
-		glBufferData(GL_PIXEL_PACK_BUFFER, RSXThread::m_width * RSXThread::m_height * 4, 0, GL_STREAM_READ);
-		glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
-		WriteDepthBuffer();
-	}
+	gl::texture::channel a = gl::texture::channel::a;
+	gl::texture::channel r = gl::texture::channel::r;
+	gl::texture::channel g = gl::texture::channel::g;
+	gl::texture::channel b = gl::texture::channel::b;
 
-	if (Ini.GSDumpColorBuffers.GetValue())
+	color_swizzle() = default;
+	color_swizzle(gl::texture::channel a, gl::texture::channel r, gl::texture::channel g, gl::texture::channel b)
+		: a(a), r(r), g(g), b(b)
 	{
-		WriteColorBuffers();
+	}
+};
+
+struct color_format
+{
+	gl::texture::type type;
+	gl::texture::format format;
+	bool swap_bytes;
+	int channel_count;
+	int channel_size;
+	color_swizzle swizzle;
+};
+
+color_format surface_color_format_to_gl(int color_format)
+{
+	//color format
+	switch (color_format)
+	{
+	case CELL_GCM_SURFACE_R5G6B5:
+		return{ gl::texture::type::ushort_5_6_5, gl::texture::format::bgr, false, 3, 2 };
+
+	case CELL_GCM_SURFACE_A8R8G8B8:
+		return{ gl::texture::type::uint_8_8_8_8, gl::texture::format::bgra, false, 4, 1 };
+
+	case CELL_GCM_SURFACE_X8R8G8B8_O8R8G8B8:
+		return{ gl::texture::type::uint_8_8_8_8, gl::texture::format::bgra, false, 4, 1,
+		{ gl::texture::channel::one, gl::texture::channel::r, gl::texture::channel::g, gl::texture::channel::b } };
+
+	case CELL_GCM_SURFACE_F_W16Z16Y16X16:
+		return{ gl::texture::type::f16, gl::texture::format::rgba, true, 4, 2 };
+
+	case CELL_GCM_SURFACE_F_W32Z32Y32X32:
+		return{ gl::texture::type::f32, gl::texture::format::rgba, true, 4, 4 };
+
+	case CELL_GCM_SURFACE_B8:
+	case CELL_GCM_SURFACE_X1R5G5B5_Z1R5G5B5:
+	case CELL_GCM_SURFACE_X1R5G5B5_O1R5G5B5:
+	case CELL_GCM_SURFACE_X8R8G8B8_Z8R8G8B8:
+	case CELL_GCM_SURFACE_G8B8:
+	case CELL_GCM_SURFACE_F_X32:
+	case CELL_GCM_SURFACE_X8B8G8R8_Z8B8G8R8:
+	case CELL_GCM_SURFACE_X8B8G8R8_O8B8G8R8:
+	case CELL_GCM_SURFACE_A8B8G8R8:
+	default:
+		LOG_ERROR(RSX, "Surface color buffer: Unsupported surface color format (0x%x)", color_format);
+		return{ gl::texture::type::uint_8_8_8_8, gl::texture::format::bgra, false, 4, 1 };
 	}
 }
 
-void GLGSRender::WriteDepthBuffer()
+std::pair<gl::texture::type, gl::texture::format> surface_depth_format_to_gl(int depth_format)
 {
-	if (!m_set_context_dma_z)
+	switch (depth_format)
 	{
-		return;
+	case CELL_GCM_SURFACE_Z16:
+		return std::make_pair(gl::texture::type::ushort, gl::texture::format::depth);
+
+	default:
+		LOG_ERROR(RSX, "Surface depth buffer: Unsupported surface depth format (0x%x)", depth_format);
+	case CELL_GCM_SURFACE_Z24S8:
+		return std::make_pair(gl::texture::type::uint_24_8, gl::texture::format::depth_stencil);
+		//return std::make_pair(gl::texture::type::f32, gl::texture::format::depth);
 	}
-
-	u32 address = GetAddress(m_surface_offset_z, m_context_dma_z - 0xfeed0000);
-
-	auto ptr = vm::get_ptr<void>(address);
-	glBindBuffer(GL_PIXEL_PACK_BUFFER, g_pbo[4]);
-	checkForGlError("WriteDepthBuffer(): glBindBuffer");
-	glReadPixels(0, 0, RSXThread::m_width, RSXThread::m_height, GL_DEPTH_COMPONENT, GL_UNSIGNED_BYTE, 0);
-	checkForGlError("WriteDepthBuffer(): glReadPixels");
-	GLubyte *packed = (GLubyte *)glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
-	if (packed)
-	{
-		memcpy(ptr, packed, RSXThread::m_width * RSXThread::m_height * 4);
-		glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
-		checkForGlError("WriteDepthBuffer(): glUnmapBuffer");
-	}
-
-	glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
-
-	checkForGlError("WriteDepthBuffer(): glReadPixels");
-	glBindTexture(GL_TEXTURE_2D, g_depth_tex);
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, RSXThread::m_width, RSXThread::m_height, 0, GL_ALPHA, GL_UNSIGNED_BYTE, ptr);
-	checkForGlError("WriteDepthBuffer(): glTexImage2D");
-	glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8, ptr);
-	checkForGlError("WriteDepthBuffer(): glGetTexImage");
 }
 
-void GLGSRender::WriteColorBufferA()
+void GLGSRender::init_buffers(bool skip_reading)
 {
-	if (!m_set_context_dma_color_a)
+	u32 surface_format = rsx::method_registers[NV4097_SET_SURFACE_FORMAT];
+
+	u32 clip_horizontal = rsx::method_registers[NV4097_SET_SURFACE_CLIP_HORIZONTAL];
+	u32 clip_vertical = rsx::method_registers[NV4097_SET_SURFACE_CLIP_VERTICAL];
+
+	u32 clip_width = clip_horizontal >> 16;
+	u32 clip_height = clip_vertical >> 16;
+	u32 clip_x = clip_horizontal;
+	u32 clip_y = clip_vertical;
+
+	if (!draw_fbo || m_surface.format != surface_format)
 	{
-		return;
-	}
+		m_surface.unpack(surface_format);
+		m_surface.width = clip_width;
+		m_surface.height = clip_height;
 
-	u32 address = GetAddress(m_surface_offset_a, m_context_dma_color_a - 0xfeed0000);
+		LOG_WARNING(RSX, "surface: %dx%d", clip_width, clip_height);
 
-	glReadBuffer(GL_COLOR_ATTACHMENT0);
-	checkForGlError("WriteColorBufferA(): glReadBuffer");
-	glBindBuffer(GL_PIXEL_PACK_BUFFER, g_pbo[0]);
-	checkForGlError("WriteColorBufferA(): glBindBuffer");
-	glReadPixels(0, 0, RSXThread::m_width, RSXThread::m_height, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8, 0);
-	checkForGlError("WriteColorBufferA(): glReadPixels");
-	GLubyte *packed = (GLubyte *)glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
-	if (packed)
-	{
-		memcpy(vm::get_ptr<void>(address), packed, RSXThread::m_width * RSXThread::m_height * 4);
-		glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
-		checkForGlError("WriteColorBufferA(): glUnmapBuffer");
-	}
+		draw_fbo.recreate();
+		m_draw_tex_depth_stencil.recreate(gl::texture::target::texture2D);
 
-	glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
-}
+		auto format = surface_color_format_to_gl(m_surface.color_format);
 
-void GLGSRender::WriteColorBufferB()
-{
-	if (!m_set_context_dma_color_b)
-	{
-		return;
-	}
-
-	u32 address = GetAddress(m_surface_offset_b, m_context_dma_color_b - 0xfeed0000);
-
-	glReadBuffer(GL_COLOR_ATTACHMENT1);
-	checkForGlError("WriteColorBufferB(): glReadBuffer");
-	glBindBuffer(GL_PIXEL_PACK_BUFFER, g_pbo[1]);
-	checkForGlError("WriteColorBufferB(): glBindBuffer");
-	glReadPixels(0, 0, RSXThread::m_width, RSXThread::m_height, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8, 0);
-	checkForGlError("WriteColorBufferB(): glReadPixels");
-	GLubyte *packed = (GLubyte *)glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
-	if (packed)
-	{
-		memcpy(vm::get_ptr<void>(address), packed, RSXThread::m_width * RSXThread::m_height * 4);
-		glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
-		checkForGlError("WriteColorBufferB(): glUnmapBuffer");
-	}
-
-	glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
-}
-
-void GLGSRender::WriteColorBufferC()
-{
-	if (!m_set_context_dma_color_c)
-	{
-		return;
-	}
-
-	u32 address = GetAddress(m_surface_offset_c, m_context_dma_color_c - 0xfeed0000);
-
-	glReadBuffer(GL_COLOR_ATTACHMENT2);
-	checkForGlError("WriteColorBufferC(): glReadBuffer");
-	glBindBuffer(GL_PIXEL_PACK_BUFFER, g_pbo[2]);
-	checkForGlError("WriteColorBufferC(): glBindBuffer");
-	glReadPixels(0, 0, RSXThread::m_width, RSXThread::m_height, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8, 0);
-	checkForGlError("WriteColorBufferC(): glReadPixels");
-	GLubyte *packed = (GLubyte *)glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
-	if (packed)
-	{
-		memcpy(vm::get_ptr<void>(address), packed, RSXThread::m_width * RSXThread::m_height * 4);
-		glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
-		checkForGlError("WriteColorBufferC(): glUnmapBuffer");
-	}
-
-	glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
-}
-
-void GLGSRender::WriteColorBufferD()
-{
-	if (!m_set_context_dma_color_d)
-	{
-		return;
-	}
-
-	u32 address = GetAddress(m_surface_offset_d, m_context_dma_color_d - 0xfeed0000);
-
-	glReadBuffer(GL_COLOR_ATTACHMENT3);
-	checkForGlError("WriteColorBufferD(): glReadBuffer");
-	glBindBuffer(GL_PIXEL_PACK_BUFFER, g_pbo[3]);
-	checkForGlError("WriteColorBufferD(): glBindBuffer");
-	glReadPixels(0, 0, RSXThread::m_width, RSXThread::m_height, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8, 0);
-	checkForGlError("WriteColorBufferD(): glReadPixels");
-	GLubyte *packed = (GLubyte *)glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
-	if (packed)
-	{
-		memcpy(vm::get_ptr<void>(address), packed, RSXThread::m_width * RSXThread::m_height * 4);
-		glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
-		checkForGlError("WriteColorBufferD(): glUnmapBuffer");
-	}
-
-	glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
-
-}
-
-void GLGSRender::WriteColorBuffers()
-{
-	glPixelStorei(GL_PACK_ROW_LENGTH, 0);
-	glPixelStorei(GL_PACK_ALIGNMENT, 4);
-
-	switch(m_surface_color_target)
-	{
-	case CELL_GCM_SURFACE_TARGET_NONE:
-		return;
-
-	case CELL_GCM_SURFACE_TARGET_0:
-		glBindBuffer(GL_PIXEL_PACK_BUFFER, g_pbo[0]);
-		glBufferData(GL_PIXEL_PACK_BUFFER, RSXThread::m_width * RSXThread::m_height * 4, 0, GL_STREAM_READ);
-		glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
-		WriteColorBufferA();
-		break;
-
-	case CELL_GCM_SURFACE_TARGET_1:
-		glBindBuffer(GL_PIXEL_PACK_BUFFER, g_pbo[1]);
-		glBufferData(GL_PIXEL_PACK_BUFFER, RSXThread::m_width * RSXThread::m_height * 4, 0, GL_STREAM_READ);
-		glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
-		WriteColorBufferB();
-		break;
-
-	case CELL_GCM_SURFACE_TARGET_MRT1:
-		for (int i = 0; i < 2; i++)
+		for (int i = 0; i < rsx::limits::color_buffers_count; ++i)
 		{
-			glBindBuffer(GL_PIXEL_PACK_BUFFER, g_pbo[i]);
-			glBufferData(GL_PIXEL_PACK_BUFFER, RSXThread::m_width * RSXThread::m_height * 4, 0, GL_STREAM_READ);
-		}
-		glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
-		WriteColorBufferA();
-		WriteColorBufferB();
-		break;
+			m_draw_tex_color[i].recreate(gl::texture::target::texture2D);
+			__glcheck m_draw_tex_color[i].config()
+				.size({ (int)m_surface.width, (int)m_surface.height })
+				.type(format.type)
+				.format(format.format)
+				.swizzle(format.swizzle.r, format.swizzle.g, format.swizzle.b, format.swizzle.a);
 
-	case CELL_GCM_SURFACE_TARGET_MRT2:
-		for (int i = 0; i < 3; i++)
-		{
-			glBindBuffer(GL_PIXEL_PACK_BUFFER, g_pbo[i]);
-			glBufferData(GL_PIXEL_PACK_BUFFER, RSXThread::m_width * RSXThread::m_height * 4, 0, GL_STREAM_READ);
-		}
-		glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
-		WriteColorBufferA();
-		WriteColorBufferB();
-		WriteColorBufferC();
-		break;
+			__glcheck m_draw_tex_color[i].pixel_pack_settings().swap_bytes(format.swap_bytes).aligment(1);
+			__glcheck m_draw_tex_color[i].pixel_unpack_settings().swap_bytes(format.swap_bytes).aligment(1);
 
-	case CELL_GCM_SURFACE_TARGET_MRT3:
-		for (int i = 0; i < 4; i++)
-		{
-			glBindBuffer(GL_PIXEL_PACK_BUFFER, g_pbo[i]);
-			glBufferData(GL_PIXEL_PACK_BUFFER, RSXThread::m_width * RSXThread::m_height * 4, 0, GL_STREAM_READ);
-		}
-		glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
-		WriteColorBufferA();
-		WriteColorBufferB();
-		WriteColorBufferC();
-		WriteColorBufferD();
-		break;
-	}
-}
-
-void GLGSRender::OnInit()
-{
-	m_draw_frames = 1;
-	m_skip_frames = 0;
-	RSXThread::m_width = 720;
-	RSXThread::m_height = 576;
-	RSXThread::m_width_scale = 2.0f;
-	RSXThread::m_height_scale = 2.0f;
-
-	last_width = 0;
-	last_height = 0;
-	last_depth_format = 0;
-
-	m_frame->Show();
-}
-
-void GLGSRender::OnInitThread()
-{
-	m_context = m_frame->GetNewContext();
-	
-	m_frame->SetCurrent(m_context);
-
-	InitProcTable();
-
-	is_intel_vendor = strstr((const char*)glGetString(GL_VENDOR), "Intel");
-	
-	glEnable(GL_TEXTURE_2D);
-	glEnable(GL_VERTEX_PROGRAM_POINT_SIZE);
-
-	glGenTextures(1, &g_depth_tex);
-	glGenTextures(1, &g_flip_tex);
-	glGenBuffers(6, g_pbo); // 4 for color buffers + 1 for depth buffer + 1 for flip()
-
-#ifdef _WIN32
-	glSwapInterval(Ini.GSVSyncEnable.GetValue() ? 1 : 0);
-#endif
-
-}
-
-void GLGSRender::OnExitThread()
-{
-	glDeleteTextures(1, &g_flip_tex);
-	glDeleteTextures(1, &g_depth_tex);
-	glDeleteBuffers(6, g_pbo);
-
-	glDisable(GL_TEXTURE_2D);
-	glDisable(GL_VERTEX_PROGRAM_POINT_SIZE);
-
-	m_program.Delete();
-	m_rbo.Delete();
-	m_fbo.Delete();
-	m_vbo.Delete();
-	m_vao.Delete();
-}
-
-void GLGSRender::OnReset()
-{
-	m_program.UnUse();
-
-	if (m_vbo.IsCreated())
-	{
-		m_vbo.UnBind();
-		m_vbo.Delete();
-	}
-
-	m_vao.Delete();
-}
-
-void GLGSRender::InitDrawBuffers()
-{
-	if (!m_fbo.IsCreated() || RSXThread::m_width != last_width || RSXThread::m_height != last_height || last_depth_format != m_surface_depth_format)
-	{
-		LOG_WARNING(RSX, "New FBO (%dx%d)", RSXThread::m_width, RSXThread::m_height);
-		last_width = RSXThread::m_width;
-		last_height = RSXThread::m_height;
-		last_depth_format = m_surface_depth_format;
-
-		m_fbo.Create();
-		checkForGlError("m_fbo.Create");
-		m_fbo.Bind();
-
-		m_rbo.Create(4 + 1);
-		checkForGlError("m_rbo.Create");
-
-		for (int i = 0; i < 4; ++i)
-		{
-			m_rbo.Bind(i);
-			m_rbo.Storage(GL_RGBA, RSXThread::m_width, RSXThread::m_height);
-			checkForGlError("m_rbo.Storage(GL_RGBA)");
+			__glcheck draw_fbo.color[i] = m_draw_tex_color[i];
+			__glcheck draw_fbo.check();
 		}
 
-		m_rbo.Bind(4);
-
-		switch (m_surface_depth_format)
+		switch (m_surface.depth_format)
 		{
-		case 0:
-		{
-			// case 0 found in BLJM60410-[Suzukaze no Melt - Days in the Sanctuary]
-			// [E : RSXThread]: Bad depth format! (0)
-			// [E : RSXThread]: glEnable: opengl error 0x0506
-			// [E : RSXThread]: glDrawArrays: opengl error 0x0506
-			m_rbo.Storage(GL_DEPTH_COMPONENT, RSXThread::m_width, RSXThread::m_height);
-			checkForGlError("m_rbo.Storage(GL_DEPTH_COMPONENT)");
-			break;
-		}
-
 		case CELL_GCM_SURFACE_Z16:
 		{
-			m_rbo.Storage(GL_DEPTH_COMPONENT16, RSXThread::m_width, RSXThread::m_height);
-			checkForGlError("m_rbo.Storage(GL_DEPTH_COMPONENT16)");
+			__glcheck m_draw_tex_depth_stencil.config()
+				.size({ (int)m_surface.width, (int)m_surface.height })
+				.type(gl::texture::type::ushort)
+				.format(gl::texture::format::depth)
+				.internal_format(gl::texture::internal_format::depth16);
 
-			m_fbo.Renderbuffer(GL_DEPTH_ATTACHMENT, m_rbo.GetId(4));
-			checkForGlError("m_fbo.Renderbuffer(GL_DEPTH_ATTACHMENT)");
+			__glcheck draw_fbo.depth = m_draw_tex_depth_stencil;
 			break;
 		}
-			
 
 		case CELL_GCM_SURFACE_Z24S8:
 		{
-			m_rbo.Storage(GL_DEPTH24_STENCIL8, RSXThread::m_width, RSXThread::m_height);
-			checkForGlError("m_rbo.Storage(GL_DEPTH24_STENCIL8)");
+			__glcheck m_draw_tex_depth_stencil.config()
+				.size({ (int)m_surface.width, (int)m_surface.height })
+				.type(gl::texture::type::uint_24_8)
+				.format(gl::texture::format::depth_stencil)
+				.internal_format(gl::texture::internal_format::depth24_stencil8);
 
-			m_fbo.Renderbuffer(GL_DEPTH_ATTACHMENT, m_rbo.GetId(4));
-			checkForGlError("m_fbo.Renderbuffer(GL_DEPTH_ATTACHMENT)");
-
-			m_fbo.Renderbuffer(GL_STENCIL_ATTACHMENT, m_rbo.GetId(4));
-			checkForGlError("m_fbo.Renderbuffer(GL_STENCIL_ATTACHMENT)");
-
+			__glcheck draw_fbo.depth_stencil = m_draw_tex_depth_stencil;
 			break;
-
 		}
-			
+
+		case 0:
+			break;
 
 		default:
 		{
-			LOG_ERROR(RSX, "Bad depth format! (%d)", m_surface_depth_format);
+			LOG_ERROR(RSX, "Bad depth format! (%d)", m_surface.depth_format);
 			assert(0);
 			break;
 		}
 		}
 
-		for (int i = 0; i < 4; ++i)
-		{
-			m_fbo.Renderbuffer(GL_COLOR_ATTACHMENT0 + i, m_rbo.GetId(i));
-			checkForGlError(fmt::Format("m_fbo.Renderbuffer(GL_COLOR_ATTACHMENT%d)", i));
-		}
-
-		//m_fbo.Renderbuffer(GL_DEPTH_ATTACHMENT, m_rbo.GetId(4));
-		//checkForGlError("m_fbo.Renderbuffer(GL_DEPTH_ATTACHMENT)");
-
-		//if (m_surface_depth_format == 2)
-		//{
-		//	m_fbo.Renderbuffer(GL_STENCIL_ATTACHMENT, m_rbo.GetId(4));
-		//	checkForGlError("m_fbo.Renderbuffer(GL_STENCIL_ATTACHMENT)");
-		//}
+		__glcheck m_draw_tex_depth_stencil.pixel_pack_settings().aligment(1);
+		__glcheck m_draw_tex_depth_stencil.pixel_unpack_settings().aligment(1);
 	}
 
-	if (!m_set_surface_clip_horizontal)
+	if (!skip_reading)
 	{
-		m_surface_clip_x = 0;
-		m_surface_clip_w = RSXThread::m_width;
+		read_buffers();
 	}
 
-	if (!m_set_surface_clip_vertical)
-	{
-		m_surface_clip_y = 0;
-		m_surface_clip_h = RSXThread::m_height;
-	}
+	set_viewport();
 
-	m_fbo.Bind();
-
-	static const GLenum draw_buffers[] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3 };
-
-	switch (m_surface_color_target)
+	switch (rsx::method_registers[NV4097_SET_SURFACE_COLOR_TARGET])
 	{
 	case CELL_GCM_SURFACE_TARGET_NONE: break;
 
 	case CELL_GCM_SURFACE_TARGET_0:
-	{
-		glDrawBuffer(draw_buffers[0]);
-		checkForGlError("glDrawBuffer(0)");
+		__glcheck draw_fbo.draw_buffer(draw_fbo.color[0]);
 		break;
-	}
-		
+
 	case CELL_GCM_SURFACE_TARGET_1:
-	{
-		glDrawBuffer(draw_buffers[1]);
-		checkForGlError("glDrawBuffer(1)");
+		__glcheck draw_fbo.draw_buffer(draw_fbo.color[1] );
 		break;
-	}
-		
+
 	case CELL_GCM_SURFACE_TARGET_MRT1:
-	{
-		glDrawBuffers(2, draw_buffers);
-		checkForGlError("glDrawBuffers(2)");
+		__glcheck draw_fbo.draw_buffers({ draw_fbo.color[0], draw_fbo.color[1] });
 		break;
-	}
-		
+
 	case CELL_GCM_SURFACE_TARGET_MRT2:
-	{
-		glDrawBuffers(3, draw_buffers);
-		checkForGlError("glDrawBuffers(3)");
+		__glcheck draw_fbo.draw_buffers({ draw_fbo.color[0], draw_fbo.color[1], draw_fbo.color[2] });
 		break;
-	}
 
 	case CELL_GCM_SURFACE_TARGET_MRT3:
-	{
-		glDrawBuffers(4, draw_buffers);
-		checkForGlError("glDrawBuffers(4)");
+		__glcheck draw_fbo.draw_buffers({ draw_fbo.color[0], draw_fbo.color[1], draw_fbo.color[2], draw_fbo.color[3] });
 		break;
-	}
 
 	default:
-	{
-		LOG_ERROR(RSX, "Bad surface color target: %d", m_surface_color_target);
+		LOG_ERROR(RSX, "Bad surface color target: %d", rsx::method_registers[NV4097_SET_SURFACE_COLOR_TARGET]);
 		break;
 	}
-		
-	}
-
-	if (m_read_buffer)
-	{
-		u32 format = GL_BGRA;
-		CellGcmDisplayInfo* buffers = vm::get_ptr<CellGcmDisplayInfo>(m_gcm_buffers_addr);
-		u32 addr = GetAddress(buffers[m_gcm_current_buffer].offset, CELL_GCM_LOCATION_LOCAL);
-		u32 width = buffers[m_gcm_current_buffer].width;
-		u32 height = buffers[m_gcm_current_buffer].height;
-		glDrawPixels(width, height, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8, vm::get_ptr(addr));
-	}
 }
 
-void GLGSRender::Clear(u32 cmd)
+static const u32 mr_color_offset[rsx::limits::color_buffers_count] =
 {
-	assert(cmd == NV4097_CLEAR_SURFACE);
+	NV4097_SET_SURFACE_COLOR_AOFFSET,
+	NV4097_SET_SURFACE_COLOR_BOFFSET,
+	NV4097_SET_SURFACE_COLOR_COFFSET,
+	NV4097_SET_SURFACE_COLOR_DOFFSET
+};
 
-	InitDrawBuffers();
-
-	if (m_set_color_mask)
-	{
-		glColorMask(m_color_mask_r, m_color_mask_g, m_color_mask_b, m_color_mask_a);
-		checkForGlError("glColorMask");
-	}
-
-	if (m_set_scissor_horizontal && m_set_scissor_vertical)
-	{
-		glScissor(m_scissor_x, m_scissor_y, m_scissor_w, m_scissor_h);
-		checkForGlError("glScissor");
-	}
-
-	GLbitfield f = 0;
-
-	if (m_clear_surface_mask & 0x1)
-	{
-		glClearDepth(m_clear_surface_z / (float)0xffffff);
-		checkForGlError("glClearDepth");
-
-		f |= GL_DEPTH_BUFFER_BIT;
-	}
-
-	if (m_clear_surface_mask & 0x2)
-	{
-		glClearStencil(m_clear_surface_s);
-		checkForGlError("glClearStencil");
-
-		f |= GL_STENCIL_BUFFER_BIT;
-	}
-
-	if (m_clear_surface_mask & 0xF0)
-	{
-		glClearColor(
-			m_clear_surface_color_r / 255.0f,
-			m_clear_surface_color_g / 255.0f,
-			m_clear_surface_color_b / 255.0f,
-			m_clear_surface_color_a / 255.0f);
-		checkForGlError("glClearColor");
-
-		f |= GL_COLOR_BUFFER_BIT;
-	}
-
-	glClear(f);
-	checkForGlError("glClear");
-
-	WriteBuffers();
-}
-
-void GLGSRender::Draw()
+static const u32 mr_color_dma[rsx::limits::color_buffers_count] =
 {
-	//return;
-	if (!LoadProgram())
-	{
-		LOG_ERROR(RSX, "LoadProgram failed.");
-		Emu.Pause();
+	NV4097_SET_CONTEXT_DMA_COLOR_A,
+	NV4097_SET_CONTEXT_DMA_COLOR_B,
+	NV4097_SET_CONTEXT_DMA_COLOR_C,
+	NV4097_SET_CONTEXT_DMA_COLOR_D
+};
+
+static const u32 mr_color_pitch[rsx::limits::color_buffers_count] =
+{
+	NV4097_SET_SURFACE_PITCH_A,
+	NV4097_SET_SURFACE_PITCH_B,
+	NV4097_SET_SURFACE_PITCH_C,
+	NV4097_SET_SURFACE_PITCH_D
+};
+
+void GLGSRender::read_buffers()
+{
+	if (!draw_fbo)
 		return;
-	}
 
-	InitDrawBuffers();
+	glDisable(GL_STENCIL_TEST);
 
-	if (m_set_color_mask)
+	if (rpcs3::state.config.rsx.opengl.read_color_buffers)
 	{
-		glColorMask(m_color_mask_r, m_color_mask_g, m_color_mask_b, m_color_mask_a);
-		checkForGlError("glColorMask");
-	}
+		auto color_format = surface_color_format_to_gl(m_surface.color_format);
 
-	if (!m_indexed_array.m_count && !m_draw_array_count)
-	{
-		u32 min_vertex_size = ~0;
-		for (auto &i : m_vertex_data)
+		auto read_color_buffers = [&](int index, int count)
 		{
-			if (!i.size)
-				continue;
+			u32 width = rsx::method_registers[NV4097_SET_SURFACE_CLIP_HORIZONTAL] >> 16;
+			u32 height = rsx::method_registers[NV4097_SET_SURFACE_CLIP_VERTICAL] >> 16;
 
-			u32 vertex_size = i.data.size() / (i.size * i.GetTypeSize());
 
-			if (min_vertex_size > vertex_size)
-				min_vertex_size = vertex_size;
-		}
+			for (int i = index; i < index + count; ++i)
+			{
+				u32 offset = rsx::method_registers[mr_color_offset[i]];
+				u32 location = rsx::method_registers[mr_color_dma[i]];
+				u32 pitch = rsx::method_registers[mr_color_pitch[i]];
 
-		m_draw_array_count = min_vertex_size;
-		m_draw_array_first = 0;
-	}
+				if (pitch <= 64)
+					continue;
 
-	Enable(m_set_depth_test, GL_DEPTH_TEST);
-	Enable(m_set_alpha_test, GL_ALPHA_TEST);
-	Enable(m_set_blend || m_set_blend_mrt1 || m_set_blend_mrt2 || m_set_blend_mrt3, GL_BLEND);
-	Enable(m_set_scissor_horizontal && m_set_scissor_vertical, GL_SCISSOR_TEST);
-	Enable(m_set_logic_op, GL_LOGIC_OP);
-	Enable(m_set_cull_face, GL_CULL_FACE);
-	Enable(m_set_dither, GL_DITHER);
-	Enable(m_set_stencil_test, GL_STENCIL_TEST);
-	Enable(m_set_line_smooth, GL_LINE_SMOOTH);
-	Enable(m_set_poly_smooth, GL_POLYGON_SMOOTH);
-	Enable(m_set_point_sprite_control, GL_POINT_SPRITE);
-	Enable(m_set_specular, GL_LIGHTING);
-	Enable(m_set_poly_offset_fill, GL_POLYGON_OFFSET_FILL);
-	Enable(m_set_poly_offset_line, GL_POLYGON_OFFSET_LINE);
-	Enable(m_set_poly_offset_point, GL_POLYGON_OFFSET_POINT);
-	Enable(m_set_restart_index, GL_PRIMITIVE_RESTART);
-	Enable(m_set_line_stipple, GL_LINE_STIPPLE);
-	Enable(m_set_polygon_stipple, GL_POLYGON_STIPPLE);
+				m_draw_tex_color[i].pixel_unpack_settings().row_length(pitch / (color_format.channel_size * color_format.channel_count));
 
-	if (!is_intel_vendor)
-	{
-		Enable(m_set_depth_bounds_test, GL_DEPTH_BOUNDS_TEST_EXT);
-	}
-	
-	if (m_set_clip_plane)
-	{
-		Enable(m_clip_plane_0, GL_CLIP_PLANE0);
-		Enable(m_clip_plane_1, GL_CLIP_PLANE1);
-		Enable(m_clip_plane_2, GL_CLIP_PLANE2);
-		Enable(m_clip_plane_3, GL_CLIP_PLANE3);
-		Enable(m_clip_plane_4, GL_CLIP_PLANE4);
-		Enable(m_clip_plane_5, GL_CLIP_PLANE5);
+				rsx::tiled_region color_buffer = get_tiled_address(offset, location & 0xf);
 
-		checkForGlError("m_set_clip_plane");
-	}
+				if (!color_buffer.tile)
+				{
+					__glcheck m_draw_tex_color[i].copy_from(color_buffer.ptr, color_format.format, color_format.type);
+				}
+				else
+				{
+					std::unique_ptr<u8[]> buffer(new u8[pitch * height]);
+					color_buffer.read(buffer.get(), width, height, pitch);
 
-	checkForGlError("glEnable");
+					__glcheck m_draw_tex_color[i].copy_from(buffer.get(), color_format.format, color_format.type);
+				}
+			}
+		};
 
-	if (m_set_front_polygon_mode)
-	{
-		glPolygonMode(GL_FRONT, m_front_polygon_mode);
-		checkForGlError("glPolygonMode(Front)");
-	}
-
-	if (m_set_back_polygon_mode)
-	{
-		glPolygonMode(GL_BACK, m_back_polygon_mode);
-		checkForGlError("glPolygonMode(Back)");
-	}
-
-	if (m_set_point_size)
-	{
-		glPointSize(m_point_size);
-		checkForGlError("glPointSize");
-	}
-
-	if (m_set_poly_offset_mode)
-	{
-		glPolygonOffset(m_poly_offset_scale_factor, m_poly_offset_bias);
-		checkForGlError("glPolygonOffset");
-	}
-
-	if (m_set_logic_op)
-	{
-		glLogicOp(m_logic_op);
-		checkForGlError("glLogicOp");
-	}
-
-	if (m_set_scissor_horizontal && m_set_scissor_vertical)
-	{
-		glScissor(m_scissor_x, m_scissor_y, m_scissor_w, m_scissor_h);
-		checkForGlError("glScissor");
-	}
-
-	if (m_set_two_sided_stencil_test_enable)
-	{
-		if (m_set_stencil_fail && m_set_stencil_zfail && m_set_stencil_zpass)
+		switch (rsx::method_registers[NV4097_SET_SURFACE_COLOR_TARGET])
 		{
-			glStencilOpSeparate(GL_FRONT, m_stencil_fail, m_stencil_zfail, m_stencil_zpass);
-			checkForGlError("glStencilOpSeparate");
-		}
-
-		if (m_set_stencil_mask)
-		{
-			glStencilMaskSeparate(GL_FRONT, m_stencil_mask);
-			checkForGlError("glStencilMaskSeparate");
-		}
-
-		if (m_set_stencil_func && m_set_stencil_func_ref && m_set_stencil_func_mask)
-		{
-			glStencilFuncSeparate(GL_FRONT, m_stencil_func, m_stencil_func_ref, m_stencil_func_mask);
-			checkForGlError("glStencilFuncSeparate");
-		}
-
-		if (m_set_back_stencil_fail && m_set_back_stencil_zfail && m_set_back_stencil_zpass)
-		{
-			glStencilOpSeparate(GL_BACK, m_back_stencil_fail, m_back_stencil_zfail, m_back_stencil_zpass);
-			checkForGlError("glStencilOpSeparate(GL_BACK)");
-		}
-
-		if (m_set_back_stencil_mask)
-		{
-			glStencilMaskSeparate(GL_BACK, m_back_stencil_mask);
-			checkForGlError("glStencilMaskSeparate(GL_BACK)");
-		}
-
-		if (m_set_back_stencil_func && m_set_back_stencil_func_ref && m_set_back_stencil_func_mask)
-		{
-			glStencilFuncSeparate(GL_BACK, m_back_stencil_func, m_back_stencil_func_ref, m_back_stencil_func_mask);
-			checkForGlError("glStencilFuncSeparate(GL_BACK)");
-		}
-	}
-	else
-	{
-		if (m_set_stencil_fail && m_set_stencil_zfail && m_set_stencil_zpass)
-		{
-			glStencilOp(m_stencil_fail, m_stencil_zfail, m_stencil_zpass);
-			checkForGlError("glStencilOp");
-		}
-
-		if (m_set_stencil_mask)
-		{
-			glStencilMask(m_stencil_mask);
-			checkForGlError("glStencilMask");
-		}
-
-		if (m_set_stencil_func && m_set_stencil_func_ref && m_set_stencil_func_mask)
-		{
-			glStencilFunc(m_stencil_func, m_stencil_func_ref, m_stencil_func_mask);
-			checkForGlError("glStencilFunc");
-		}
-	}
-
-	// TODO: Use other glLightModel functions?
-	glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, m_set_two_side_light_enable ? GL_TRUE : GL_FALSE);
-	checkForGlError("glLightModeli");
-
-	if (m_set_shade_mode)
-	{
-		glShadeModel(m_shade_mode);
-		checkForGlError("glShadeModel");
-	}
-
-	if (m_set_depth_mask)
-	{
-		glDepthMask(m_depth_mask);
-		checkForGlError("glDepthMask");
-	}
-
-	if (m_set_depth_func)
-	{
-		glDepthFunc(m_depth_func);
-		checkForGlError("glDepthFunc");
-	}
-
-	if (m_set_depth_bounds && !is_intel_vendor)
-	{
-		glDepthBoundsEXT(m_depth_bounds_min, m_depth_bounds_max);
-		checkForGlError("glDepthBounds");
-	}
-
-	if (m_set_clip)
-	{
-		glDepthRangef(m_clip_min, m_clip_max);
-		checkForGlError("glDepthRangef");
-	}
-
-	if (m_set_line_width)
-	{
-		glLineWidth(m_line_width);
-		checkForGlError("glLineWidth");
-	}
-
-	if (m_set_line_stipple)
-	{
-		glLineStipple(m_line_stipple_factor, m_line_stipple_pattern);
-		checkForGlError("glLineStipple");
-	}
-
-	if (m_set_polygon_stipple)
-	{
-		glPolygonStipple((const GLubyte*)m_polygon_stipple_pattern);
-		checkForGlError("glPolygonStipple");
-	}
-
-	if (m_set_blend_equation)
-	{
-		glBlendEquationSeparate(m_blend_equation_rgb, m_blend_equation_alpha);
-		checkForGlError("glBlendEquationSeparate");
-	}
-
-	if (m_set_blend_sfactor && m_set_blend_dfactor)
-	{
-		glBlendFuncSeparate(m_blend_sfactor_rgb, m_blend_dfactor_rgb, m_blend_sfactor_alpha, m_blend_dfactor_alpha);
-		checkForGlError("glBlendFuncSeparate");
-	}
-
-	if (m_set_blend_color)
-	{
-		glBlendColor(m_blend_color_r, m_blend_color_g, m_blend_color_b, m_blend_color_a);
-		checkForGlError("glBlendColor");
-	}
-
-	if (m_set_cull_face)
-	{
-		glCullFace(m_cull_face);
-		checkForGlError("glCullFace");
-	}
-
-	if (m_set_front_face)
-	{
-		glFrontFace(m_front_face);
-		checkForGlError("glFrontFace");
-	}
-
-	if (m_set_alpha_func && m_set_alpha_ref)
-	{
-		glAlphaFunc(m_alpha_func, m_alpha_ref);
-		checkForGlError("glAlphaFunc");
-	}
-
-	if (m_set_fog_mode)
-	{
-		glFogi(GL_FOG_MODE, m_fog_mode);
-		checkForGlError("glFogi(GL_FOG_MODE)");
-	}
-
-	if (m_set_fog_params)
-	{
-		glFogf(GL_FOG_START, m_fog_param0);
-		checkForGlError("glFogf(GL_FOG_START)");
-		glFogf(GL_FOG_END, m_fog_param1);
-		checkForGlError("glFogf(GL_FOG_END)");
-	}
-
-	if (m_set_restart_index)
-	{
-		glPrimitiveRestartIndex(m_restart_index);
-		checkForGlError("glPrimitiveRestartIndex");
-	}
-
-	if (m_indexed_array.m_count && m_draw_array_count)
-	{
-		LOG_WARNING(RSX, "m_indexed_array.m_count && draw_array_count");
-	}
-
-	for (u32 i = 0; i < m_textures_count; ++i)
-	{
-		if (!m_textures[i].IsEnabled()) continue;
-
-		glActiveTexture(GL_TEXTURE0 + i);
-		checkForGlError("glActiveTexture");
-		m_gl_textures[i].Create();
-		m_gl_textures[i].Bind();
-		checkForGlError(fmt::Format("m_gl_textures[%d].Bind", i));
-		m_program.SetTex(i);
-		m_gl_textures[i].Init(m_textures[i]);
-		checkForGlError(fmt::Format("m_gl_textures[%d].Init", i));
-	}
-
-	for (u32 i = 0; i < m_textures_count; ++i)
-	{
-		if (!m_vertex_textures[i].IsEnabled()) continue;
-
-		glActiveTexture(GL_TEXTURE0 + m_textures_count + i);
-		checkForGlError("glActiveTexture");
-		m_gl_vertex_textures[i].Create();
-		m_gl_vertex_textures[i].Bind();
-		checkForGlError(fmt::Format("m_gl_vertex_textures[%d].Bind", i));
-		m_program.SetVTex(i);
-		m_gl_vertex_textures[i].Init(m_vertex_textures[i]);
-		checkForGlError(fmt::Format("m_gl_vertex_textures[%d].Init", i));
-	}
-
-	m_vao.Bind();
-
-	if (m_indexed_array.m_count)
-		LoadVertexData(m_indexed_array.index_min, m_indexed_array.index_max - m_indexed_array.index_min + 1);
-	else
-		LoadVertexData(m_draw_array_first, m_draw_array_count);
-
-	if (m_indexed_array.m_count || m_draw_array_count)
-	{
-		EnableVertexData(m_indexed_array.m_count ? true : false);
-
-		InitVertexData();
-		InitFragmentData();
-	}
-
-	if (m_indexed_array.m_count)
-	{
-		switch(m_indexed_array.m_type)
-		{
-		case CELL_GCM_DRAW_INDEX_ARRAY_TYPE_32:
-			glDrawElements(m_draw_mode - 1, m_indexed_array.m_count, GL_UNSIGNED_INT, nullptr);
-			checkForGlError("glDrawElements #4");
+		case CELL_GCM_SURFACE_TARGET_NONE:
 			break;
 
-		case CELL_GCM_DRAW_INDEX_ARRAY_TYPE_16:
-			glDrawElements(m_draw_mode - 1, m_indexed_array.m_count, GL_UNSIGNED_SHORT, nullptr);
-			checkForGlError("glDrawElements #2");
+		case CELL_GCM_SURFACE_TARGET_0:
+			read_color_buffers(0, 1);
 			break;
 
-		default:
-			LOG_ERROR(RSX, "Bad indexed array type (%d)", m_indexed_array.m_type);
+		case CELL_GCM_SURFACE_TARGET_1:
+			read_color_buffers(1, 1);
+			break;
+
+		case CELL_GCM_SURFACE_TARGET_MRT1:
+			read_color_buffers(0, 2);
+			break;
+
+		case CELL_GCM_SURFACE_TARGET_MRT2:
+			read_color_buffers(0, 3);
+			break;
+
+		case CELL_GCM_SURFACE_TARGET_MRT3:
+			read_color_buffers(0, 4);
 			break;
 		}
-
-		DisableVertexData();
-		m_indexed_array.Reset();
 	}
 
-	if (m_draw_array_count)
+	if (rpcs3::state.config.rsx.opengl.read_depth_buffer)
 	{
-		//LOG_WARNING(RSX,"glDrawArrays(%d,%d,%d)", m_draw_mode - 1, m_draw_array_first, m_draw_array_count);
-		glDrawArrays(m_draw_mode - 1, 0, m_draw_array_count);
-		checkForGlError("glDrawArrays");
-		DisableVertexData();
-	}
+		//TODO: use pitch
+		u32 pitch = rsx::method_registers[NV4097_SET_SURFACE_PITCH_Z];
 
-	WriteBuffers();
+		if (pitch <= 64)
+			return;
+
+		auto depth_format = surface_depth_format_to_gl(m_surface.depth_format);
+
+		int pixel_size = m_surface.depth_format == CELL_GCM_SURFACE_Z16 ? 2 : 4;
+
+		gl::buffer pbo_depth;
+
+		__glcheck pbo_depth.create(m_surface.width * m_surface.height * pixel_size);
+		__glcheck pbo_depth.map([&](GLubyte* pixels)
+		{
+			u32 depth_address = rsx::get_address(rsx::method_registers[NV4097_SET_SURFACE_ZETA_OFFSET], rsx::method_registers[NV4097_SET_CONTEXT_DMA_ZETA]);
+
+			if (m_surface.depth_format == CELL_GCM_SURFACE_Z16)
+			{
+				u16 *dst = (u16*)pixels;
+				const be_t<u16>* src = vm::ps3::_ptr<u16>(depth_address);
+				for (int i = 0, end = m_draw_tex_depth_stencil.width() * m_draw_tex_depth_stencil.height(); i < end; ++i)
+				{
+					dst[i] = src[i];
+				}
+			}
+			else
+			{
+				u32 *dst = (u32*)pixels;
+				const be_t<u32>* src = vm::ps3::_ptr<u32>(depth_address);
+				for (int i = 0, end = m_draw_tex_depth_stencil.width() * m_draw_tex_depth_stencil.height(); i < end; ++i)
+				{
+					dst[i] = src[i];
+				}
+			}
+		}, gl::buffer::access::write);
+
+		__glcheck m_draw_tex_depth_stencil.copy_from(pbo_depth, depth_format.second, depth_format.first);
+	}
 }
 
-void GLGSRender::Flip()
+void GLGSRender::write_buffers()
 {
-	// Set scissor to FBO size 
-	if (m_set_scissor_horizontal && m_set_scissor_vertical)
-	{
-		glScissor(0, 0, RSXThread::m_width, RSXThread::m_height);
-		checkForGlError("glScissor");
-	}
+	if (!draw_fbo)
+		return;
 
-	switch (m_surface_color_target)
+	if (rpcs3::state.config.rsx.opengl.write_color_buffers)
 	{
-	case CELL_GCM_SURFACE_TARGET_0:
-	case CELL_GCM_SURFACE_TARGET_1:
-	case CELL_GCM_SURFACE_TARGET_MRT1:
-	case CELL_GCM_SURFACE_TARGET_MRT2:
-	case CELL_GCM_SURFACE_TARGET_MRT3:
-	{
-		// Fast path for non-MRT using glBlitFramebuffer.
-		GLfbo::Bind(GL_DRAW_FRAMEBUFFER, 0);
-		// Renderbuffer is upside turn , swapped srcY0 and srcY1
-		GLfbo::Blit(0, RSXThread::m_height, RSXThread::m_width, 0, 0, 0, RSXThread::m_width, RSXThread::m_height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
-	}
-		break;
+		//gl::buffer pbo_color;
+		//__glcheck pbo_color.create(m_draw_tex_color[0].width() * m_draw_tex_color[0].height() * 4);
 
-	case CELL_GCM_SURFACE_TARGET_NONE:
-	{
-		// Slow path for MRT/None target using glReadPixels.
-		static u8* src_buffer = nullptr;
-		static u32 width = 0;
-		static u32 height = 0;
-		GLenum format = GL_RGBA;
+		auto color_format = surface_color_format_to_gl(m_surface.color_format);
 
-		if (m_read_buffer)
+		auto write_color_buffers = [&](int index, int count)
 		{
-			format = GL_BGRA;
-			CellGcmDisplayInfo* buffers = vm::get_ptr<CellGcmDisplayInfo>(m_gcm_buffers_addr);
-			u32 addr = GetAddress(buffers[m_gcm_current_buffer].offset, CELL_GCM_LOCATION_LOCAL);
-			width = buffers[m_gcm_current_buffer].width;
-			height = buffers[m_gcm_current_buffer].height;
-			src_buffer = vm::get_ptr<u8>(addr);
-		}
-		else if (m_fbo.IsCreated())
-		{
-			format = GL_RGBA;
-			static std::vector<u8> pixels;
-			pixels.resize(RSXThread::m_width * RSXThread::m_height * 4);
-			m_fbo.Bind(GL_READ_FRAMEBUFFER);
-			glBindBuffer(GL_PIXEL_PACK_BUFFER, g_pbo[5]);
-			glBufferData(GL_PIXEL_PACK_BUFFER, RSXThread::m_width * RSXThread::m_height * 4, 0, GL_STREAM_READ);
-			glReadPixels(0, 0, RSXThread::m_width, RSXThread::m_height, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8, 0);
-			checkForGlError("Flip(): glReadPixels(GL_BGRA, GL_UNSIGNED_INT_8_8_8_8)");
-			GLubyte *packed = (GLubyte *)glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
-			if (packed)
+			u32 width = rsx::method_registers[NV4097_SET_SURFACE_CLIP_HORIZONTAL] >> 16;
+			u32 height = rsx::method_registers[NV4097_SET_SURFACE_CLIP_VERTICAL] >> 16;
+
+			for (int i = index; i < index + count; ++i)
 			{
-				memcpy(pixels.data(), packed, RSXThread::m_width * RSXThread::m_height * 4);
-				glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
-				checkForGlError("Flip(): glUnmapBuffer");
-			}
-			glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+				//TODO: swizzle
+				//__glcheck m_draw_tex_color[i].copy_to(pbo_color, color_format.format, color_format.type);
 
-			src_buffer = pixels.data();
-			width = RSXThread::m_width;
-			height = RSXThread::m_height;
+				//pbo_color.map([&](GLubyte* pixels)
+				//{
+				//	u32 color_address = rsx::get_address(rsx::method_registers[mr_color_offset[i]], rsx::method_registers[mr_color_dma[i]]);
+				//	//u32 depth_address = rsx::get_address(rsx::method_registers[NV4097_SET_SURFACE_ZETA_OFFSET], rsx::method_registers[NV4097_SET_CONTEXT_DMA_ZETA]);
+
+				//	const u32 *src = (const u32*)pixels;
+				//	be_t<u32>* dst = vm::ps3::_ptr<u32>(color_address);
+				//	for (int i = 0, end = m_draw_tex_color[i].width() * m_draw_tex_color[i].height(); i < end; ++i)
+				//	{
+				//		dst[i] = src[i];
+				//	}
+
+				//}, gl::buffer::access::read);
+
+				u32 offset = rsx::method_registers[mr_color_offset[i]];
+				u32 location = rsx::method_registers[mr_color_dma[i]];
+				u32 pitch = rsx::method_registers[mr_color_pitch[i]];
+
+				if (pitch <= 64)
+					continue;
+
+				m_draw_tex_color[i].pixel_pack_settings().row_length(pitch / (color_format.channel_size * color_format.channel_count));
+
+				rsx::tiled_region color_buffer = get_tiled_address(offset, location & 0xf);
+
+				if (!color_buffer.tile)
+				{
+					__glcheck m_draw_tex_color[i].copy_to(color_buffer.ptr, color_format.format, color_format.type);
+				}
+				else
+				{
+					std::unique_ptr<u8[]> buffer(new u8[pitch * height]);
+
+					__glcheck m_draw_tex_color[i].copy_to(buffer.get(), color_format.format, color_format.type);
+
+					color_buffer.write(buffer.get(), width, height, pitch);
+				}
+			}
+		};
+
+		switch (rsx::method_registers[NV4097_SET_SURFACE_COLOR_TARGET])
+		{
+		case CELL_GCM_SURFACE_TARGET_NONE:
+			break;
+
+		case CELL_GCM_SURFACE_TARGET_0:
+			write_color_buffers(0, 1);
+			break;
+
+		case CELL_GCM_SURFACE_TARGET_1:
+			write_color_buffers(1, 1);
+			break;
+
+		case CELL_GCM_SURFACE_TARGET_MRT1:
+			write_color_buffers(0, 2);
+			break;
+
+		case CELL_GCM_SURFACE_TARGET_MRT2:
+			write_color_buffers(0, 3);
+			break;
+
+		case CELL_GCM_SURFACE_TARGET_MRT3:
+			write_color_buffers(0, 4);
+			break;
+		}
+	}
+
+	if (rpcs3::state.config.rsx.opengl.write_depth_buffer)
+	{
+		//TODO: use pitch
+		u32 pitch = rsx::method_registers[NV4097_SET_SURFACE_PITCH_Z];
+
+		if (pitch <= 64)
+			return;
+
+		auto depth_format = surface_depth_format_to_gl(m_surface.depth_format);
+
+		gl::buffer pbo_depth;
+
+		int pixel_size = m_surface.depth_format == CELL_GCM_SURFACE_Z16 ? 2 : 4;
+
+		__glcheck pbo_depth.create(m_surface.width * m_surface.height * pixel_size);
+		__glcheck m_draw_tex_depth_stencil.copy_to(pbo_depth, depth_format.second, depth_format.first);
+
+		__glcheck pbo_depth.map([&](GLubyte* pixels)
+		{
+			u32 depth_address = rsx::get_address(rsx::method_registers[NV4097_SET_SURFACE_ZETA_OFFSET], rsx::method_registers[NV4097_SET_CONTEXT_DMA_ZETA]);
+
+			if (m_surface.depth_format == CELL_GCM_SURFACE_Z16)
+			{
+				const u16 *src = (const u16*)pixels;
+				be_t<u16>* dst = vm::ps3::_ptr<u16>(depth_address);
+				for (int i = 0, end = m_draw_tex_depth_stencil.width() * m_draw_tex_depth_stencil.height(); i < end; ++i)
+				{
+					dst[i] = src[i];
+				}
+			}
+			else
+			{
+				const u32 *src = (const u32*)pixels;
+				be_t<u32>* dst = vm::ps3::_ptr<u32>(depth_address);
+				for (int i = 0, end = m_draw_tex_depth_stencil.width() * m_draw_tex_depth_stencil.height(); i < end; ++i)
+				{
+					dst[i] = src[i];
+				}
+			}
+
+		}, gl::buffer::access::read);
+	}
+}
+
+void GLGSRender::flip(int buffer)
+{
+	//LOG_NOTICE(Log::RSX, "flip(%d)", buffer);
+	u32 buffer_width = gcm_buffers[buffer].width;
+	u32 buffer_height = gcm_buffers[buffer].height;
+	u32 buffer_pitch = gcm_buffers[buffer].pitch;
+
+	rsx::tiled_region buffer_region = get_tiled_address(gcm_buffers[buffer].offset, CELL_GCM_LOCATION_LOCAL);
+
+	bool skip_read = false;
+
+	if (draw_fbo && !rpcs3::state.config.rsx.opengl.write_color_buffers)
+	{
+		skip_read = true;
+		/*
+		for (uint i = 0; i < rsx::limits::color_buffers_count; ++i)
+		{
+			u32 color_address = rsx::get_address(rsx::method_registers[mr_color_offset[i]], rsx::method_registers[mr_color_dma[i]]);
+
+			if (color_address == buffer_address)
+			{
+				skip_read = true;
+				__glcheck draw_fbo.draw_buffer(draw_fbo.color[i]);
+				break;
+			}
+		}
+		*/
+	}
+
+	if (!skip_read)
+	{
+		if (!m_flip_tex_color || m_flip_tex_color.size() != sizei{ (int)buffer_width, (int)buffer_height })
+		{
+			m_flip_tex_color.recreate(gl::texture::target::texture2D);
+
+			__glcheck m_flip_tex_color.config()
+				.size({ (int)buffer_width, (int)buffer_height })
+				.type(gl::texture::type::uint_8_8_8_8)
+				.format(gl::texture::format::bgra);
+
+			m_flip_tex_color.pixel_unpack_settings().aligment(1).row_length(buffer_pitch / 4);
+
+			__glcheck m_flip_fbo.recreate();
+			__glcheck m_flip_fbo.color = m_flip_tex_color;
+		}
+
+		__glcheck m_flip_fbo.draw_buffer(m_flip_fbo.color);
+
+		m_flip_fbo.bind();
+
+		glDisable(GL_SCISSOR_TEST);
+		glDisable(GL_DEPTH_TEST);
+		glDisable(GL_STENCIL_TEST);
+		glDisable(GL_BLEND);
+		glDisable(GL_LOGIC_OP);
+		glDisable(GL_CULL_FACE);
+
+		if (buffer_region.tile)
+		{
+			std::unique_ptr<u8> temp(new u8[buffer_height * buffer_pitch]);
+			buffer_region.read(temp.get(), buffer_width, buffer_height, buffer_pitch);
+			__glcheck m_flip_tex_color.copy_from(temp.get(), gl::texture::format::bgra, gl::texture::type::uint_8_8_8_8);
 		}
 		else
 		{
-			src_buffer = nullptr;
-		}
-			
-		if (src_buffer)
-		{
-			glDisable(GL_STENCIL_TEST);
-			glDisable(GL_DEPTH_TEST);
-			glDisable(GL_CLIP_PLANE0);
-			glDisable(GL_CLIP_PLANE1);
-			glDisable(GL_CLIP_PLANE2);
-			glDisable(GL_CLIP_PLANE3);
-			glDisable(GL_CLIP_PLANE4);
-			glDisable(GL_CLIP_PLANE5);
-			glActiveTexture(GL_TEXTURE0);
-			glBindTexture(GL_TEXTURE_2D, g_flip_tex);
-			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, format, GL_UNSIGNED_INT_8_8_8_8, src_buffer);
-			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_A, GL_ONE);
-			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-
-			glMatrixMode(GL_PROJECTION);
-			glLoadIdentity();
-			glOrtho(0, 1, 0, 1, 0, 1);
-			glMatrixMode(GL_MODELVIEW);
-			glLoadIdentity();
-
-			GLfbo::Bind(GL_DRAW_FRAMEBUFFER, 0);
-
-			m_program.UnUse();
-			m_program.Use();
-			glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT | GL_ACCUM_BUFFER_BIT);
-
-			glColor3f(1, 1, 1);
-			glBegin(GL_QUADS);
-			glTexCoord2i(0, 1);
-			glVertex2i(0, 0);
-			glTexCoord2i(1, 1);
-			glVertex2i(1, 0);
-			glTexCoord2i(1, 0);
-			glVertex2i(1, 1);
-			glTexCoord2i(0, 0);
-			glVertex2i(0, 1);
-			glEnd();
+			__glcheck m_flip_tex_color.copy_from(buffer_region.ptr, gl::texture::format::bgra, gl::texture::type::uint_8_8_8_8);
 		}
 	}
-		break;
-	}
 
-	// Draw Objects
-	for (uint i = 0; i < m_post_draw_objs.size(); ++i)
+	areai screen_area = coordi({}, { (int)buffer_width, (int)buffer_height });
+
+	coordi aspect_ratio;
+	if (1) //enable aspect ratio
 	{
-		m_post_draw_objs[i].Draw();
+		sizei csize = m_frame->client_size();
+		sizei new_size = csize;
+
+		const double aq = (double)buffer_width / buffer_height;
+		const double rq = (double)new_size.width / new_size.height;
+		const double q = aq / rq;
+
+		if (q > 1.0)
+		{
+			new_size.height = int(new_size.height / q);
+			aspect_ratio.y = (csize.height - new_size.height) / 2;
+		}
+		else if (q < 1.0)
+		{
+			new_size.width = int(new_size.width * q);
+			aspect_ratio.x = (csize.width - new_size.width) / 2;
+		}
+
+		aspect_ratio.size = new_size;
 	}
-
-	m_frame->Flip(m_context);
-
-	// Restore scissor
-	if (m_set_scissor_horizontal && m_set_scissor_vertical)
+	else
 	{
-		glScissor(m_scissor_x, m_scissor_y, m_scissor_w, m_scissor_h);
-		checkForGlError("glScissor");
+		aspect_ratio.size = m_frame->client_size();
 	}
 
-}
+	gl::screen.clear(gl::buffers::color_depth_stencil);
 
-void GLGSRender::semaphorePGRAPHTextureReadRelease(u32 offset, u32 value)
-{
-	vm::write32(m_label_addr + offset, value);
-}
-
-void GLGSRender::semaphorePGRAPHBackendRelease(u32 offset, u32 value)
-{
-	vm::write32(m_label_addr + offset, value);
-}
-
-void GLGSRender::semaphorePFIFOAcquire(u32 offset, u32 value)
-{
-
-}
-
-u32 LinearToSwizzleAddress(u32 x, u32 y, u32 z, u32 log2_width, u32 log2_height, u32 log2_depth)
-{
-	u32 offset = 0;
-	u32 shift_count = 0;
-	while (log2_width | log2_height | log2_depth){
-		if (log2_width)
-		{
-			offset |= (x & 0x01) << shift_count;
-			x >>= 1;
-			++shift_count;
-			--log2_width;
-		}
-		if (log2_height)
-		{
-			offset |= (y & 0x01) << shift_count;
-			y >>= 1;
-			++shift_count;
-			--log2_height;
-		}
-		if (log2_depth)
-		{
-			offset |= (z & 0x01) << shift_count;
-			z >>= 1;
-			++shift_count;
-			--log2_depth;
-		}
+	if (!skip_read)
+	{
+		__glcheck m_flip_fbo.blit(gl::screen, screen_area, areai(aspect_ratio).flipped_vertical());
 	}
-	return offset;
+	else
+	{
+		__glcheck draw_fbo.blit(gl::screen, screen_area, areai(aspect_ratio).flipped_vertical());
+	}
+
+	m_frame->flip(m_context);
+}
+
+
+u64 GLGSRender::timestamp() const
+{
+	GLint64 result;
+	glGetInteger64v(GL_TIMESTAMP, &result);
+	return result;
 }

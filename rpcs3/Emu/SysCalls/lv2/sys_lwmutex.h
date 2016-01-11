@@ -1,6 +1,6 @@
 #pragma once
 
-#include "sleep_queue.h"
+#include "Utilities/SleepQueue.h"
 
 namespace vm { using namespace ps3; }
 
@@ -8,12 +8,7 @@ struct sys_lwmutex_attribute_t
 {
 	be_t<u32> protocol;
 	be_t<u32> recursive;
-
-	union
-	{
-		char name[8];
-		u64 name_u64;
-	};
+	char name[8];
 };
 
 enum : u32
@@ -33,7 +28,7 @@ struct sys_lwmutex_t
 
 	union
 	{
-		atomic_be_t<sync_var_t> lock_var;
+		atomic_t<sync_var_t> lock_var;
 
 		struct
 		{
@@ -69,8 +64,6 @@ struct lv2_lwmutex_t
 
 	void unlock(lv2_lock_t& lv2_lock);
 };
-
-REG_ID_TYPE(lv2_lwmutex_t, 0x95); // SYS_LWMUTEX_OBJECT
 
 // Aux
 class PPUThread;

@@ -92,6 +92,8 @@ struct Mouse
 		: m_data()
 		, m_rawdata()
 	{
+		x_pos = 0;
+		y_pos = 0;
 	}
 };
 
@@ -104,6 +106,7 @@ protected:
 public:
 	virtual void Init(const u32 max_connect)=0;
 	virtual void Close()=0;
+	virtual ~MouseHandlerBase() = default;
 
 	void Button(u8 button, bool pressed)
 	{

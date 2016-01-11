@@ -1,13 +1,12 @@
-/**
-* Contains utility shaders
-*/
 #include "stdafx.h"
-#if defined(DX12_SUPPORT)
+#include "stdafx_d3d12.h"
+#ifdef _MSC_VER
 #include "D3D12GSRender.h"
-#include <d3dcompiler.h>
+#include "d3dx12.h"
 #define STRINGIFY(x) #x
 
 extern PFN_D3D12_SERIALIZE_ROOT_SIGNATURE wrapD3D12SerializeRootSignature;
+extern pD3DCompile wrapD3DCompile;
 
  /**
  * returns bytecode and root signature of a Compute Shader converting texture from
@@ -29,34 +28,26 @@ std::pair<ID3DBlob *, ID3DBlob *> compileF32toU8CS()
 
 	ID3DBlob *bytecode;
 	Microsoft::WRL::ComPtr<ID3DBlob> errorBlob;
-	HRESULT hr = D3DCompile(shaderCode, strlen(shaderCode), "test", nullptr, nullptr, "main", "cs_5_0", 0, 0, &bytecode, errorBlob.GetAddressOf());
+	HRESULT hr = wrapD3DCompile(shaderCode, strlen(shaderCode), "test", nullptr, nullptr, "main", "cs_5_0", 0, 0, &bytecode, errorBlob.GetAddressOf());
 	if (hr != S_OK)
 	{
 		const char *tmp = (const char*)errorBlob->GetBufferPointer();
 		LOG_ERROR(RSX, tmp);
 	}
-	D3D12_DESCRIPTOR_RANGE descriptorRange[2] = {};
-	// Textures
-	descriptorRange[0].BaseShaderRegister = 0;
-	descriptorRange[0].NumDescriptors = 1;
-	descriptorRange[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-	descriptorRange[1].BaseShaderRegister = 0;
-	descriptorRange[1].NumDescriptors = 1;
-	descriptorRange[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-	descriptorRange[1].OffsetInDescriptorsFromTableStart = 1;
-	D3D12_ROOT_PARAMETER RP[2] = {};
-	RP[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-	RP[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-	RP[0].DescriptorTable.pDescriptorRanges = &descriptorRange[0];
-	RP[0].DescriptorTable.NumDescriptorRanges = 2;
+	CD3DX12_DESCRIPTOR_RANGE descriptorRange[] =
+	{
+		// Textures
+		CD3DX12_DESCRIPTOR_RANGE(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0),
+		// UAV (same descriptor heap)
+		CD3DX12_DESCRIPTOR_RANGE(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, 1),
+	};
 
-	D3D12_ROOT_SIGNATURE_DESC rootSignatureDesc = {};
-	rootSignatureDesc.NumParameters = 1;
-	rootSignatureDesc.pParameters = RP;
+	CD3DX12_ROOT_PARAMETER RP;
+	RP.InitAsDescriptorTable(2, &descriptorRange[0]);
 
 	ID3DBlob *rootSignatureBlob;
 
-	hr = wrapD3D12SerializeRootSignature(&rootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1, &rootSignatureBlob, &errorBlob);
+	hr = wrapD3D12SerializeRootSignature(&CD3DX12_ROOT_SIGNATURE_DESC(1, &RP), D3D_ROOT_SIGNATURE_VERSION_1, &rootSignatureBlob, &errorBlob);
 	if (hr != S_OK)
 	{
 		const char *tmp = (const char*)errorBlob->GetBufferPointer();
@@ -67,7 +58,7 @@ std::pair<ID3DBlob *, ID3DBlob *> compileF32toU8CS()
 }
 
 
-void D3D12GSRender::Shader::Init(ID3D12Device *device)
+void D3D12GSRender::Shader::Init(ID3D12Device *device, ID3D12CommandQueue *gfxcommandqueue)
 {
 	const char *fsCode = STRINGIFY(
 		Texture2D InputTexture : register(t0); \n
@@ -87,7 +78,7 @@ void D3D12GSRender::Shader::Init(ID3D12Device *device)
 
 	Microsoft::WRL::ComPtr<ID3DBlob> fsBytecode;
 	Microsoft::WRL::ComPtr<ID3DBlob> errorBlob;
-	HRESULT hr = D3DCompile(fsCode, strlen(fsCode), "test", nullptr, nullptr, "main", "ps_5_0", 0, 0, &fsBytecode, errorBlob.GetAddressOf());
+	HRESULT hr = wrapD3DCompile(fsCode, strlen(fsCode), "test", nullptr, nullptr, "main", "ps_5_0", 0, 0, &fsBytecode, errorBlob.GetAddressOf());
 	if (hr != S_OK)
 	{
 		const char *tmp = (const char*)errorBlob->GetBufferPointer();
@@ -117,7 +108,7 @@ void D3D12GSRender::Shader::Init(ID3D12Device *device)
 	);
 
 	Microsoft::WRL::ComPtr<ID3DBlob> vsBytecode;
-	hr = D3DCompile(vsCode, strlen(vsCode), "test", nullptr, nullptr, "main", "vs_5_0", 0, 0, &vsBytecode, errorBlob.GetAddressOf());
+	hr = wrapD3DCompile(vsCode, strlen(vsCode), "test", nullptr, nullptr, "main", "vs_5_0", 0, 0, &vsBytecode, errorBlob.GetAddressOf());
 	if (hr != S_OK)
 	{
 		const char *tmp = (const char*)errorBlob->GetBufferPointer();
@@ -185,8 +176,21 @@ void D3D12GSRender::Shader::Init(ID3D12Device *device)
 	psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
 	psoDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
 
-	ThrowIfFailed(device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_PSO)));
+	CHECK_HRESULT(device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_PSO)));
 
+	D3D12_DESCRIPTOR_HEAP_DESC textureHeapDesc = { D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV , 2, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE };
+	CHECK_HRESULT(
+		device->CreateDescriptorHeap(&textureHeapDesc, IID_PPV_ARGS(&m_textureDescriptorHeap))
+		);
+	D3D12_DESCRIPTOR_HEAP_DESC samplerHeapDesc = { D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER , 2, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE };
+	CHECK_HRESULT(
+		device->CreateDescriptorHeap(&samplerHeapDesc, IID_PPV_ARGS(&m_samplerDescriptorHeap))
+		);
+
+	ComPtr<ID3D12Fence> fence;
+	CHECK_HRESULT(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(fence.GetAddressOf())));
+	HANDLE handle = CreateEventEx(nullptr, FALSE, FALSE, EVENT_ALL_ACCESS);
+	fence->SetEventOnCompletion(1, handle);
 
 	float quadVertex[16] = {
 		-1., -1., 0., 1.,
@@ -195,41 +199,52 @@ void D3D12GSRender::Shader::Init(ID3D12Device *device)
 		1., 1., 1., 0.,
 	};
 
-	D3D12_HEAP_PROPERTIES heapProp = {};
-	heapProp.Type = D3D12_HEAP_TYPE_UPLOAD;
-	ThrowIfFailed(
+	ComPtr<ID3D12CommandAllocator> cmdlistAllocator;
+	CHECK_HRESULT(
+		device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(cmdlistAllocator.GetAddressOf()))
+			);
+	ComPtr<ID3D12GraphicsCommandList> cmdList;
+	CHECK_HRESULT(
+		device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, cmdlistAllocator.Get(),nullptr, IID_PPV_ARGS(cmdList.GetAddressOf()))
+			);
+	ComPtr<ID3D12Resource> intermediateBuffer;
+	CHECK_HRESULT(device->CreateCommittedResource(
+		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
+		D3D12_HEAP_FLAG_NONE,
+		&CD3DX12_RESOURCE_DESC::Buffer(16 * sizeof(float)),
+		D3D12_RESOURCE_STATE_GENERIC_READ,
+		nullptr,
+		IID_PPV_ARGS(intermediateBuffer.GetAddressOf())
+		));
+
+	CHECK_HRESULT(
 		device->CreateCommittedResource(
-			&heapProp,
+			&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
 			D3D12_HEAP_FLAG_NONE,
-			&getBufferResourceDesc(16 * sizeof(float)),
-			D3D12_RESOURCE_STATE_GENERIC_READ,
+			&CD3DX12_RESOURCE_DESC::Buffer(16 * sizeof(float)),
+			D3D12_RESOURCE_STATE_COPY_DEST,
 			nullptr,
 			IID_PPV_ARGS(&m_vertexBuffer)
 			));
 
-	void *tmp;
-	m_vertexBuffer->Map(0, nullptr, &tmp);
-	memcpy(tmp, quadVertex, 16 * sizeof(float));
-	m_vertexBuffer->Unmap(0, nullptr);
+	D3D12_SUBRESOURCE_DATA vertexData = { reinterpret_cast<BYTE*>(quadVertex), 16 * sizeof(float), 1 };
 
-	D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
-	heapDesc.NumDescriptors = 2;
-	heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-	heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+	UpdateSubresources(cmdList.Get(), m_vertexBuffer, intermediateBuffer.Get(), 0, 0, 1, &vertexData);
+	cmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(m_vertexBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER));
+	CHECK_HRESULT(cmdList->Close());
 
-	ThrowIfFailed(
-		device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&m_textureDescriptorHeap))
-		);
-	heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
-	ThrowIfFailed(
-		device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&m_samplerDescriptorHeap))
-		);
+	gfxcommandqueue->ExecuteCommandLists(1, CommandListCast(cmdList.GetAddressOf()));
+
+	// Now wait until upload has completed
+	gfxcommandqueue->Signal(fence.Get(), 1);
+	WaitForSingleObjectEx(handle, INFINITE, FALSE);
+	CloseHandle(handle);
 }
 
 void D3D12GSRender::initConvertShader()
 {
 	const auto &p = compileF32toU8CS();
-	ThrowIfFailed(
+	CHECK_HRESULT(
 		m_device->CreateRootSignature(0, p.second->GetBufferPointer(), p.second->GetBufferSize(), IID_PPV_ARGS(&m_convertRootSignature))
 		);
 
@@ -238,11 +253,12 @@ void D3D12GSRender::initConvertShader()
 	computePipelineStateDesc.CS.pShaderBytecode = p.first->GetBufferPointer();
 	computePipelineStateDesc.pRootSignature = m_convertRootSignature;
 
-	ThrowIfFailed(
+	CHECK_HRESULT(
 		m_device->CreateComputePipelineState(&computePipelineStateDesc, IID_PPV_ARGS(&m_convertPSO))
 		);
 
 	p.first->Release();
 	p.second->Release();
 }
+
 #endif

@@ -1,14 +1,19 @@
 #include "stdafx.h"
-#if defined(DX12_SUPPORT)
+#include "stdafx_d3d12.h"
+#ifdef _MSC_VER
 #include "D3D12VertexProgramDecompiler.h"
 #include "D3D12CommonDecompiler.h"
-#include "Utilities/Log.h"
 #include "Emu/System.h"
 
 
 std::string D3D12VertexProgramDecompiler::getFloatTypeName(size_t elementCount)
 {
 	return getFloatTypeNameImp(elementCount);
+}
+
+std::string D3D12VertexProgramDecompiler::getIntTypeName(size_t elementCount)
+{
+	return "int4";
 }
 
 std::string D3D12VertexProgramDecompiler::getFunction(enum class FUNCTION f)
@@ -28,6 +33,22 @@ void D3D12VertexProgramDecompiler::insertHeader(std::stringstream &OS)
 	OS << "	float4x4 scaleOffsetMat;" << std::endl;
 	OS << "	int isAlphaTested;" << std::endl;
 	OS << "	float alphaRef;" << std::endl;
+	OS << "	int tex0_is_unorm;" << std::endl;
+	OS << "	int tex1_is_unorm;" << std::endl;
+	OS << "	int tex2_is_unorm;" << std::endl;
+	OS << "	int tex3_is_unorm;" << std::endl;
+	OS << "	int tex4_is_unorm;" << std::endl;
+	OS << "	int tex5_is_unorm;" << std::endl;
+	OS << "	int tex6_is_unorm;" << std::endl;
+	OS << "	int tex7_is_unorm;" << std::endl;
+	OS << "	int tex8_is_unorm;" << std::endl;
+	OS << "	int tex9_is_unorm;" << std::endl;
+	OS << "	int tex10_is_unorm;" << std::endl;
+	OS << "	int tex11_is_unorm;" << std::endl;
+	OS << "	int tex12_is_unorm;" << std::endl;
+	OS << "	int tex13_is_unorm;" << std::endl;
+	OS << "	int tex14_is_unorm;" << std::endl;
+	OS << "	int tex15_is_unorm;" << std::endl;
 	OS << "};" << std::endl;
 }
 
@@ -38,9 +59,13 @@ void D3D12VertexProgramDecompiler::insertInputs(std::stringstream & OS, const st
 	for (const ParamType PT : inputs)
 	{
 		for (const ParamItem &PI : PT.items)
+		{
 			OS << "	" << PT.type << " " << PI.name << ": TEXCOORD" << PI.location << ";" << std::endl;
+			input_slots.push_back(PI.location);
+		}
 	}
 	OS << "};" << std::endl;
+
 }
 
 void D3D12VertexProgramDecompiler::insertConstants(std::stringstream & OS, const std::vector<ParamType> & constants)
@@ -65,7 +90,7 @@ void D3D12VertexProgramDecompiler::insertOutputs(std::stringstream & OS, const s
 	OS << "	float4 dst_reg3 : COLOR2;" << std::endl;
 	OS << "	float4 dst_reg4 : COLOR3;" << std::endl;
 	OS << "	float dst_reg5 : FOG;" << std::endl;
-	OS << "	float4 dst_reg6 : COLOR4;" << std::endl;
+	OS << "	float4 dst_reg6 : TEXCOORD9;" << std::endl;
 	OS << "	float4 dst_reg7 : TEXCOORD0;" << std::endl;
 	OS << "	float4 dst_reg8 : TEXCOORD1;" << std::endl;
 	OS << "	float4 dst_reg9 : TEXCOORD2;" << std::endl;
@@ -98,10 +123,12 @@ static const reg_info reg_table[] =
 	{ "gl_ClipDistance[0]", false, "dst_reg5", ".y", false },
 	{ "gl_ClipDistance[1]", false, "dst_reg5", ".z", false },
 	{ "gl_ClipDistance[2]", false, "dst_reg5", ".w", false },
-	{ "gl_PointSize", false, "dst_reg6", ".x", false },
+	// TODO: Handle user clip distance properly
+/*	{ "gl_PointSize", false, "dst_reg6", ".x", false },
 	{ "gl_ClipDistance[3]", false, "dst_reg6", ".y", false },
 	{ "gl_ClipDistance[4]", false, "dst_reg6", ".z", false },
-	{ "gl_ClipDistance[5]", false, "dst_reg6", ".w", false },
+	{ "gl_ClipDistance[5]", false, "dst_reg6", ".w", false },*/
+	{ "tc9", false, "dst_reg6", "", false },
 	{ "tc0", true, "dst_reg7", "", false },
 	{ "tc1", true, "dst_reg8", "", false },
 	{ "tc2", true, "dst_reg9", "", false },
@@ -111,7 +138,6 @@ static const reg_info reg_table[] =
 	{ "tc6", true, "dst_reg13", "", false },
 	{ "tc7", true, "dst_reg14", "", false },
 	{ "tc8", true, "dst_reg15", "", false },
-	{ "tc9", true, "dst_reg6", "", false }  // In this line, dst_reg6 is correct since dst_reg goes from 0 to 15.
 };
 
 void D3D12VertexProgramDecompiler::insertMainStart(std::stringstream & OS)
@@ -127,6 +153,8 @@ void D3D12VertexProgramDecompiler::insertMainStart(std::stringstream & OS)
 			OS << "	" << PT.type << " " << PI.name;
 			if (!PI.value.empty())
 				OS << " = " << PI.value;
+			else
+				OS << " = " << "float4(0., 0., 0., 0.);";
 			OS << ";" << std::endl;
 		}
 	}
@@ -141,7 +169,7 @@ void D3D12VertexProgramDecompiler::insertMainStart(std::stringstream & OS)
 
 void D3D12VertexProgramDecompiler::insertMainEnd(std::stringstream & OS)
 {
-	OS << "	PixelInput Out;" << std::endl;
+	OS << "	PixelInput Out = (PixelInput)0;" << std::endl;
 	// Declare inside main function
 	for (auto &i : reg_table)
 	{
@@ -157,5 +185,4 @@ D3D12VertexProgramDecompiler::D3D12VertexProgramDecompiler(std::vector<u32>& dat
 	VertexProgramDecompiler(data)
 {
 }
-
 #endif

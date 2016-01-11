@@ -1,8 +1,7 @@
 #include "stdafx.h"
-#include "Utilities/Log.h"
 #include "OpenGL.h"
 
-void InitProcTable()
+void gl::init()
 {
 #ifdef _WIN32
 #define OPENGL_PROC(p, n) OPENGL_PROC2(p, n, gl##n)

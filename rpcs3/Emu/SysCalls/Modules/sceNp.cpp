@@ -1,17 +1,16 @@
 #include "stdafx.h"
 #include "Emu/Memory/Memory.h"
 #include "Emu/System.h"
+#include "Emu/state.h"
 #include "Emu/SysCalls/Modules.h"
 #include "Emu/SysCalls/lv2/sys_process.h"
-#include "rpcs3/Ini.h"
 
 #include "Emu/FS/VFS.h"
-#include "Utilities/File.h"
 #include "Emu/FS/vfsDir.h"
 #include "Crypto/unedat.h"
 #include "sceNp.h"
 
-extern Module sceNp;
+extern Module<> sceNp;
 
 s32 sceNpInit(u32 poolsize, vm::ptr<void> poolptr)
 {
@@ -57,7 +56,7 @@ s32 npDrmIsAvailable(u32 k_licensee_addr, vm::cptr<char> drm_path)
 		for (s32 i = 0; i < 0x10; i++)
 		{
 			k_licensee[i] = vm::read8(k_licensee_addr + i);
-			k_licensee_str += fmt::Format("%02x", k_licensee[i]);
+			k_licensee_str += fmt::format("%02x", k_licensee[i]);
 		}
 	}
 
@@ -1521,7 +1520,7 @@ s32 _Z32_sce_np_sysutil_cxml_prepare_docPN16sysutil_cxmlutil11FixedMemoryERN4cxm
 }
 
 
-Module sceNp("sceNp", []()
+Module<> sceNp("sceNp", []()
 {
 	REG_FUNC(sceNp, sceNpInit);
 	REG_FUNC(sceNp, sceNpTerm);

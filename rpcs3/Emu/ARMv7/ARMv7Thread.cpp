@@ -1,8 +1,7 @@
 #include "stdafx.h"
-#include "rpcs3/Ini.h"
-#include "Utilities/Log.h"
 #include "Emu/Memory/Memory.h"
 #include "Emu/System.h"
+#include "Emu/state.h"
 #include "Emu/IdManager.h"
 #include "Emu/ARMv7/PSVFuncList.h"
 
@@ -28,7 +27,7 @@ void armv7_init_tls()
 
 	for (auto& v : g_armv7_tls_owners)
 	{
-		v.store(0, std::memory_order_relaxed);
+		v = 0;
 	}
 }
 
@@ -53,8 +52,8 @@ u32 armv7_get_tls(u32 thread)
 		if (g_armv7_tls_owners[i].compare_exchange_strong(old, thread))
 		{
 			const u32 addr = g_armv7_tls_start + i * Emu.GetTLSMemsz(); // get TLS address
-			memcpy(vm::get_ptr(addr), vm::get_ptr(Emu.GetTLSAddr()), Emu.GetTLSFilesz()); // initialize from TLS image
-			memset(vm::get_ptr(addr + Emu.GetTLSFilesz()), 0, Emu.GetTLSMemsz() - Emu.GetTLSFilesz()); // fill the rest with zeros
+			std::memcpy(vm::base(addr), vm::base(Emu.GetTLSAddr()), Emu.GetTLSFilesz()); // initialize from TLS image
+			std::memset(vm::base(addr + Emu.GetTLSFilesz()), 0, Emu.GetTLSMemsz() - Emu.GetTLSFilesz()); // fill the rest with zeros
 			return addr;
 		}
 	}
@@ -80,18 +79,20 @@ void armv7_free_tls(u32 thread)
 }
 
 ARMv7Thread::ARMv7Thread(const std::string& name)
-	: CPUThread(CPU_THREAD_ARMv7, name, WRAP_EXPR(fmt::format("ARMv7[0x%x] Thread (%s)[0x%08x]", m_id, m_name.c_str(), PC)))
+	: CPUThread(CPU_THREAD_ARMv7, name)
 	, ARMv7Context({})
 {
 }
 
 ARMv7Thread::~ARMv7Thread()
 {
-	cv.notify_one();
-	join();
-
 	close_stack();
 	armv7_free_tls(m_id);
+}
+
+std::string ARMv7Thread::get_name() const
+{
+	return fmt::format("ARMv7 Thread[0x%x] (%s)[0x%08x]", m_id, CPUThread::get_name(), PC);
 }
 
 void ARMv7Thread::dump_info() const
@@ -141,7 +142,7 @@ void ARMv7Thread::close_stack()
 {
 	if (stack_addr)
 	{
-		vm::dealloc(stack_addr, vm::main);
+		vm::dealloc_verbose_nothrow(stack_addr, vm::main);
 		stack_addr = 0;
 	}
 }
@@ -151,16 +152,16 @@ std::string ARMv7Thread::RegsToString() const
 	std::string result = "Registers:\n=========\n";
 	for(int i=0; i<15; ++i)
 	{
-		result += fmt::Format("%s\t= 0x%08x\n", g_arm_reg_name[i], GPR[i]);
+		result += fmt::format("%s\t= 0x%08x\n", g_arm_reg_name[i], GPR[i]);
 	}
 
-	result += fmt::Format("APSR\t= 0x%08x [N: %d, Z: %d, C: %d, V: %d, Q: %d]\n", 
+	result += fmt::format("APSR\t= 0x%08x [N: %d, Z: %d, C: %d, V: %d, Q: %d]\n", 
 		APSR.APSR,
-		fmt::by_value(APSR.N),
-		fmt::by_value(APSR.Z),
-		fmt::by_value(APSR.C),
-		fmt::by_value(APSR.V),
-		fmt::by_value(APSR.Q));
+		u32{ APSR.N },
+		u32{ APSR.Z },
+		u32{ APSR.C },
+		u32{ APSR.V },
+		u32{ APSR.Q });
 	
 	return result;
 }
@@ -179,31 +180,29 @@ void ARMv7Thread::do_run()
 {
 	m_dec.reset();
 
-	switch(Ini.CPUDecoderMode.GetValue())
+	switch((int)rpcs3::state.config.core.ppu_decoder.value())
 	{
 	case 0:
 	case 1:
 		m_dec.reset(new ARMv7Decoder(*this));
 		break;
 	default:
-		LOG_ERROR(ARMv7, "Invalid CPU decoder mode: %d", Ini.CPUDecoderMode.GetValue());
+		LOG_ERROR(ARMv7, "Invalid CPU decoder mode: %d", (int)rpcs3::state.config.core.ppu_decoder.value());
 		Emu.Pause();
 	}
 }
 
-void ARMv7Thread::task()
+void ARMv7Thread::cpu_task()
 {
 	if (custom_task)
 	{
-		if (m_state.load() && check_status()) return;
+		if (check_status()) return;
 
 		return custom_task(*this);
 	}
 
-	while (true)
+	while (!m_state || !check_status())
 	{
-		if (m_state.load() && check_status()) break;
-
 		// decode instruction using specified decoder
 		PC += m_dec->DecodeMemory(PC);
 	}
@@ -227,7 +226,7 @@ void ARMv7Thread::fast_call(u32 addr)
 
 	try
 	{
-		task();
+		cpu_task();
 	}
 	catch (CPUThreadReturn)
 	{
@@ -253,7 +252,7 @@ void ARMv7Thread::fast_stop()
 
 armv7_thread::armv7_thread(u32 entry, const std::string& name, u32 stack_size, s32 prio)
 {
-	std::shared_ptr<ARMv7Thread> armv7 = Emu.GetIdManager().make_ptr<ARMv7Thread>(name);
+	std::shared_ptr<ARMv7Thread> armv7 = idm::make_ptr<ARMv7Thread>(name);
 
 	armv7->PC = entry;
 	armv7->stack_size = stack_size;
@@ -292,7 +291,7 @@ cpu_thread& armv7_thread::args(std::initializer_list<std::string> values)
 	}
 
 	argv = vm::alloc(argv_size, vm::main); // allocate arg list
-	memcpy(vm::get_ptr(argv), argv_data.data(), argv_size); // copy arg list
+	std::memcpy(vm::base(argv), argv_data.data(), argv_size); // copy arg list
 	
 	return *this;
 }

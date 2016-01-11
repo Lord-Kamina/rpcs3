@@ -3,9 +3,8 @@
 // Constants
 enum
 {
-	HASH_LEN = 16,
-	BUF_SIZE = 4096,
-	PKG_HEADER_SIZE = 0xC0, //sizeof(pkg_header) + sizeof(pkg_unk_checksum)
+	PKG_HEADER_SIZE  = 0xC0, //sizeof(pkg_header) + sizeof(pkg_unk_checksum)
+	PKG_HEADER_SIZE2 = 0x280,
 };
 
 enum : u16
@@ -23,9 +22,11 @@ enum : u32
 	PKG_FILE_ENTRY_NPDRMEDAT      = 2,
 	PKG_FILE_ENTRY_REGULAR        = 3,
 	PKG_FILE_ENTRY_FOLDER         = 4,
+	PKG_FILE_ENTRY_UNK1           = 6,
 	PKG_FILE_ENTRY_SDAT           = 9,
 
 	PKG_FILE_ENTRY_OVERWRITE      = 0x80000000,
+	PKG_FILE_ENTRY_PSP            = 0x10000000,
 };
 
 // Structs
@@ -42,8 +43,8 @@ struct PKGHeader
 	be_t<u64> data_offset;  // Encrypted data offset
 	be_t<u64> data_size;    // Encrypted data size in bytes
 	char title_id[48];      // Title ID
-	u8 qa_digest[16];       // This should be the hash of "files + attribs"
-	u8 klicensee[16];       // Nonce
+	be_t<u64> qa_digest[2]; // This should be the hash of "files + attribs"
+	be_t<u128> klicensee;   // Nonce
 };
 
 struct PKGEntry
@@ -56,6 +57,4 @@ struct PKGEntry
 	be_t<u32> pad;          // Padding (zeros)
 };
 
-namespace fs { struct file; }
-
-int Unpack(const fs::file& dec_pkg_f, std::string src, std::string dst);
+bool pkg_install(const class fs::file& pkg_f, const std::string& dir, volatile f64& progress);

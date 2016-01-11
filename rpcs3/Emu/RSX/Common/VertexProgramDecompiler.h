@@ -19,6 +19,12 @@
 */
 struct VertexProgramDecompiler
 {
+	D0 d0;
+	D1 d1;
+	D2 d2;
+	D3 d3;
+	SRC src[3];
+
 	struct FuncInfo
 	{
 		u32 offset;
@@ -64,6 +70,7 @@ struct VertexProgramDecompiler
 	std::string GetCond();
 	std::string AddAddrMask();
 	std::string AddAddrReg();
+	std::string AddAddrRegWithoutMask();
 	u32 GetAddr();
 	std::string Format(const std::string& code);
 
@@ -79,6 +86,10 @@ protected:
 	/** returns the type name of float vectors.
 	*/
 	virtual std::string getFloatTypeName(size_t elementCount) = 0;
+
+	/** returns the type name of int vectors.
+	*/
+	virtual std::string getIntTypeName(size_t elementCount) = 0;
 
 	/** returns string calling function where arguments are passed via
 	* $0 $1 $2 substring.

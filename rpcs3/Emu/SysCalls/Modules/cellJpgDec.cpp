@@ -15,7 +15,7 @@ extern "C"
 
 #include "cellJpgDec.h"
 
-extern Module cellJpgDec;
+extern Module<> cellJpgDec;
 
 s32 cellJpgDecCreate(u32 mainHandle, u32 threadInParam, u32 threadOutParam)
 {
@@ -44,7 +44,7 @@ s32 cellJpgDecOpen(u32 mainHandle, vm::ptr<u32> subHandle, vm::ptr<CellJpgDecSrc
 	current_subHandle.fd = 0;
 	current_subHandle.src = *src;
 
-	switch(src->srcSelect.value())
+	switch (src->srcSelect)
 	{
 	case CELL_JPGDEC_BUFFER:
 		current_subHandle.fileSize = src->streamSize;
@@ -53,17 +53,17 @@ s32 cellJpgDecOpen(u32 mainHandle, vm::ptr<u32> subHandle, vm::ptr<CellJpgDecSrc
 	case CELL_JPGDEC_FILE:
 	{
 		// Get file descriptor and size
-		std::shared_ptr<vfsStream> file_s(Emu.GetVFS().OpenFile(src->fileName.get_ptr(), vfsRead));
+		std::shared_ptr<vfsStream> file_s(Emu.GetVFS().OpenFile(src->fileName.get_ptr(), fom::read));
 		if (!file_s) return CELL_JPGDEC_ERROR_OPEN_FILE;
 
-		current_subHandle.fd = Emu.GetIdManager().make<lv2_file_t>(file_s, 0, 0);
+		current_subHandle.fd = idm::make<lv2_file_t>(file_s, 0, 0);
 		current_subHandle.fileSize = file_s->GetSize();
 		break;
 	}
 	}
 
 	// From now, every u32 subHandle argument is a pointer to a CellJpgDecSubHandle struct.
-	*subHandle = Emu.GetIdManager().make<CellJpgDecSubHandle>(current_subHandle);
+	*subHandle = idm::make<CellJpgDecSubHandle>(current_subHandle);
 
 	return CELL_OK;
 }
@@ -77,15 +77,15 @@ s32 cellJpgDecClose(u32 mainHandle, u32 subHandle)
 {
 	cellJpgDec.Warning("cellJpgDecOpen(mainHandle=0x%x, subHandle=0x%x)", mainHandle, subHandle);
 
-	const auto subHandle_data = Emu.GetIdManager().get<CellJpgDecSubHandle>(subHandle);
+	const auto subHandle_data = idm::get<CellJpgDecSubHandle>(subHandle);
 
 	if (!subHandle_data)
 	{
 		return CELL_JPGDEC_ERROR_FATAL;
 	}
 
-	Emu.GetIdManager().remove<lv2_file_t>(subHandle_data->fd);
-	Emu.GetIdManager().remove<CellJpgDecSubHandle>(subHandle);
+	idm::remove<lv2_file_t>(subHandle_data->fd);
+	idm::remove<CellJpgDecSubHandle>(subHandle);
 
 	return CELL_OK;
 }
@@ -94,7 +94,7 @@ s32 cellJpgDecReadHeader(u32 mainHandle, u32 subHandle, vm::ptr<CellJpgDecInfo> 
 {
 	cellJpgDec.Log("cellJpgDecReadHeader(mainHandle=0x%x, subHandle=0x%x, info=*0x%x)", mainHandle, subHandle, info);
 
-	const auto subHandle_data = Emu.GetIdManager().get<CellJpgDecSubHandle>(subHandle);
+	const auto subHandle_data = idm::get<CellJpgDecSubHandle>(subHandle);
 
 	if (!subHandle_data)
 	{
@@ -108,15 +108,15 @@ s32 cellJpgDecReadHeader(u32 mainHandle, u32 subHandle, vm::ptr<CellJpgDecInfo> 
 	// Write the header to buffer
 	std::unique_ptr<u8[]> buffer(new u8[fileSize]);
 
-	switch(subHandle_data->src.srcSelect.value())
+	switch (subHandle_data->src.srcSelect)
 	{
 	case CELL_JPGDEC_BUFFER:
-		std::memcpy(buffer.get(), vm::get_ptr(subHandle_data->src.streamPtr), fileSize);
+		std::memcpy(buffer.get(), vm::base(subHandle_data->src.streamPtr), fileSize);
 		break;
 
 	case CELL_JPGDEC_FILE:
 	{
-		auto file = Emu.GetIdManager().get<lv2_file_t>(fd);
+		auto file = idm::get<lv2_file_t>(fd);
 		file->file->Seek(0);
 		file->file->Read(buffer.get(), fileSize);
 		break;
@@ -173,7 +173,7 @@ s32 cellJpgDecDecodeData(u32 mainHandle, u32 subHandle, vm::ptr<u8> data, vm::cp
 
 	dataOutInfo->status = CELL_JPGDEC_DEC_STATUS_STOP;
 
-	const auto subHandle_data = Emu.GetIdManager().get<CellJpgDecSubHandle>(subHandle);
+	const auto subHandle_data = idm::get<CellJpgDecSubHandle>(subHandle);
 
 	if (!subHandle_data)
 	{
@@ -187,15 +187,15 @@ s32 cellJpgDecDecodeData(u32 mainHandle, u32 subHandle, vm::ptr<u8> data, vm::cp
 	//Copy the JPG file to a buffer
 	std::unique_ptr<u8[]> jpg(new u8[fileSize]);
 
-	switch(subHandle_data->src.srcSelect.value())
+	switch (subHandle_data->src.srcSelect)
 	{
 	case CELL_JPGDEC_BUFFER:
-		std::memcpy(jpg.get(), vm::get_ptr(subHandle_data->src.streamPtr), fileSize);
+		std::memcpy(jpg.get(), vm::base(subHandle_data->src.streamPtr), fileSize);
 		break;
 
 	case CELL_JPGDEC_FILE:
 	{
-		auto file = Emu.GetIdManager().get<lv2_file_t>(fd);
+		auto file = idm::get<lv2_file_t>(fd);
 		file->file->Seek(0);
 		file->file->Read(jpg.get(), fileSize);
 		break;
@@ -312,7 +312,7 @@ s32 cellJpgDecSetParameter(u32 mainHandle, u32 subHandle, vm::cptr<CellJpgDecInP
 {
 	cellJpgDec.Log("cellJpgDecSetParameter(mainHandle=0x%x, subHandle=0x%x, inParam=*0x%x, outParam=*0x%x)", mainHandle, subHandle, inParam, outParam);
 
-	const auto subHandle_data = Emu.GetIdManager().get<CellJpgDecSubHandle>(subHandle);
+	const auto subHandle_data = idm::get<CellJpgDecSubHandle>(subHandle);
 
 	if (!subHandle_data)
 	{
@@ -359,7 +359,7 @@ s32 cellJpgDecExtSetParameter()
 }
 
 
-Module cellJpgDec("cellJpgDec", []()
+Module<> cellJpgDec("cellJpgDec", []()
 {
 	REG_FUNC(cellJpgDec, cellJpgDecCreate);
 	REG_FUNC(cellJpgDec, cellJpgDecExtCreate);

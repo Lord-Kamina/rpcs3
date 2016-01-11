@@ -1,6 +1,6 @@
 #include "stdafx.h"
 #ifdef LLVM_AVAILABLE
-#include "Utilities/Log.h"
+#include "Emu/state.h"
 #include "Emu/System.h"
 #include "Emu/Cell/PPULLVMRecompiler.h"
 #include "Emu/Memory/Memory.h"
@@ -29,6 +29,13 @@
 #pragma warning(pop)
 #endif
 
+#define USE_INTERP_IF_REQUESTED(inst, ...) \
+	if (!rpcs3::state.config.core.llvm.enable_##inst.value()) \
+	{ \
+		Call<void>(#inst, m_state.args[CompileTaskState::Args::State], __VA_ARGS__); \
+		return; \
+	}
+
 using namespace llvm;
 using namespace ppu_recompiler_llvm;
 
@@ -41,11 +48,67 @@ void Compiler::NOP() {
 }
 
 void Compiler::TDI(u32 to, u32 ra, s32 simm16) {
-	CompilationError("TDI");
+	llvm::Value *gpr_a = GetGpr(ra);
+	llvm::Value *cst_simm16 = m_ir_builder->getInt64(simm16);
+	llvm::Value *trap_condition = m_ir_builder->getFalse();
+
+	if (to & 0x10)
+		trap_condition = m_ir_builder->CreateOr(trap_condition,
+			m_ir_builder->CreateICmpSLT(gpr_a, cst_simm16));
+	if (to & 0x8)
+		trap_condition = m_ir_builder->CreateOr(trap_condition,
+			m_ir_builder->CreateICmpSGT(gpr_a, cst_simm16));
+	if (to & 0x4)
+		trap_condition = m_ir_builder->CreateOr(trap_condition,
+			m_ir_builder->CreateICmpEQ(gpr_a, cst_simm16));
+	if (to & 0x2)
+		trap_condition = m_ir_builder->CreateOr(trap_condition,
+			m_ir_builder->CreateICmpULT(gpr_a, cst_simm16));
+	if (to & 0x1)
+		trap_condition = m_ir_builder->CreateOr(trap_condition,
+			m_ir_builder->CreateICmpUGT(gpr_a, cst_simm16));
+
+	llvm::BasicBlock *trap_block = GetBasicBlockFromAddress(m_state.current_instruction_address, "trap_block");
+	llvm::BasicBlock *normal_execution = GetBasicBlockFromAddress(m_state.current_instruction_address, "normal_execution");
+	m_ir_builder->CreateCondBr(trap_condition, trap_block, normal_execution);
+
+	m_ir_builder->SetInsertPoint(trap_block);
+	Call<void>("trap");
+	m_ir_builder->CreateRet(m_ir_builder->getInt32(ExecutionStatus::ExecutionStatusPropagateException));
+
+	m_ir_builder->SetInsertPoint(normal_execution);
 }
 
 void Compiler::TWI(u32 to, u32 ra, s32 simm16) {
-	CompilationError("TWI");
+	llvm::Value *gpr_a = GetGpr(ra, 32);
+	llvm::Value *cst_simm16 = m_ir_builder->getInt32(simm16);
+	llvm::Value *trap_condition = m_ir_builder->getFalse();
+
+	if (to & 0x10)
+		trap_condition = m_ir_builder->CreateOr(trap_condition,
+			m_ir_builder->CreateICmpSLT(gpr_a, cst_simm16));
+	if (to & 0x8)
+		trap_condition = m_ir_builder->CreateOr(trap_condition,
+			m_ir_builder->CreateICmpSGT(gpr_a, cst_simm16));
+	if (to & 0x4)
+		trap_condition = m_ir_builder->CreateOr(trap_condition,
+			m_ir_builder->CreateICmpEQ(gpr_a, cst_simm16));
+	if (to & 0x2)
+		trap_condition = m_ir_builder->CreateOr(trap_condition,
+			m_ir_builder->CreateICmpULT(gpr_a, cst_simm16));
+	if (to & 0x1)
+		trap_condition = m_ir_builder->CreateOr(trap_condition,
+			m_ir_builder->CreateICmpUGT(gpr_a, cst_simm16));
+
+	llvm::BasicBlock *trap_block = GetBasicBlockFromAddress(m_state.current_instruction_address, "trap_block");
+	llvm::BasicBlock *normal_execution = GetBasicBlockFromAddress(m_state.current_instruction_address, "normal_execution");
+	m_ir_builder->CreateCondBr(trap_condition, trap_block, normal_execution);
+
+	m_ir_builder->SetInsertPoint(trap_block);
+	Call<void>("trap");
+	m_ir_builder->CreateRet(m_ir_builder->getInt32(ExecutionStatus::ExecutionStatusPropagateException));
+
+	m_ir_builder->SetInsertPoint(normal_execution);
 }
 
 void Compiler::MFVSCR(u32 vd) {
@@ -1669,22 +1732,30 @@ void Compiler::VXOR(u32 vd, u32 va, u32 vb) {
 }
 
 void Compiler::MULLI(u32 rd, u32 ra, s32 simm16) {
+	USE_INTERP_IF_REQUESTED(MULLI, m_ir_builder->getInt32(rd), m_ir_builder->getInt32(ra), m_ir_builder->getInt32(simm16));
+
 	auto ra_i64 = GetGpr(ra);
 	auto res_i64 = m_ir_builder->CreateMul(ra_i64, m_ir_builder->getInt64((s64)simm16));
 	SetGpr(rd, res_i64);
 }
 
 void Compiler::SUBFIC(u32 rd, u32 ra, s32 simm16) {
+	USE_INTERP_IF_REQUESTED(SUBFIC, m_ir_builder->getInt32(rd), m_ir_builder->getInt32(ra), m_ir_builder->getInt32(simm16))
+
 	auto ra_i64 = GetGpr(ra);
-	ra_i64 = m_ir_builder->CreateNeg(ra_i64);
+	ra_i64 = m_ir_builder->CreateNeg(ra_i64); // simpler way of doing  ~ra + 1
 	auto res_s = m_ir_builder->CreateCall2(Intrinsic::getDeclaration(m_module, Intrinsic::uadd_with_overflow, m_ir_builder->getInt64Ty()), ra_i64, m_ir_builder->getInt64((s64)simm16));
 	auto diff_i64 = m_ir_builder->CreateExtractValue(res_s, { 0 });
 	auto carry_i1 = m_ir_builder->CreateExtractValue(res_s, { 1 });
+	auto is_zero = m_ir_builder->CreateICmpEQ(ra_i64, m_ir_builder->getInt64(0)); // if ra is zero when ~ra + 1 = 0 sets overflow bit
+	carry_i1 = m_ir_builder->CreateOr(is_zero, carry_i1);
 	SetGpr(rd, diff_i64);
 	SetXerCa(carry_i1);
 }
 
 void Compiler::CMPLI(u32 crfd, u32 l, u32 ra, u32 uimm16) {
+	USE_INTERP_IF_REQUESTED(CMPLI, m_ir_builder->getInt32(crfd), m_ir_builder->getInt32(l), m_ir_builder->getInt32(ra), m_ir_builder->getInt32(uimm16));
+
 	Value * ra_i64;
 	if (l == 0) {
 		ra_i64 = m_ir_builder->CreateZExt(GetGpr(ra, 32), m_ir_builder->getInt64Ty());
@@ -1697,6 +1768,8 @@ void Compiler::CMPLI(u32 crfd, u32 l, u32 ra, u32 uimm16) {
 }
 
 void Compiler::CMPI(u32 crfd, u32 l, u32 ra, s32 simm16) {
+	USE_INTERP_IF_REQUESTED(CMPI, m_ir_builder->getInt32(crfd), m_ir_builder->getInt32(l), m_ir_builder->getInt32(ra), m_ir_builder->getInt32(simm16));
+
 	Value * ra_i64;
 	if (l == 0) {
 		ra_i64 = m_ir_builder->CreateSExt(GetGpr(ra, 32), m_ir_builder->getInt64Ty());
@@ -1709,6 +1782,8 @@ void Compiler::CMPI(u32 crfd, u32 l, u32 ra, s32 simm16) {
 }
 
 void Compiler::ADDIC(u32 rd, u32 ra, s32 simm16) {
+	USE_INTERP_IF_REQUESTED(ADDIC, m_ir_builder->getInt32(rd), m_ir_builder->getInt32(ra), m_ir_builder->getInt32(simm16));
+
 	auto ra_i64 = GetGpr(ra);
 	auto res_s = m_ir_builder->CreateCall2(Intrinsic::getDeclaration(m_module, Intrinsic::uadd_with_overflow, m_ir_builder->getInt64Ty()), m_ir_builder->getInt64((s64)simm16), ra_i64);
 	auto sum_i64 = m_ir_builder->CreateExtractValue(res_s, { 0 });
@@ -1718,11 +1793,15 @@ void Compiler::ADDIC(u32 rd, u32 ra, s32 simm16) {
 }
 
 void Compiler::ADDIC_(u32 rd, u32 ra, s32 simm16) {
+	USE_INTERP_IF_REQUESTED(ADDIC_, m_ir_builder->getInt32(rd), m_ir_builder->getInt32(ra), m_ir_builder->getInt32(simm16));
+
 	ADDIC(rd, ra, simm16);
 	SetCrFieldSignedCmp(0, GetGpr(rd), m_ir_builder->getInt64(0));
 }
 
 void Compiler::ADDI(u32 rd, u32 ra, s32 simm16) {
+	USE_INTERP_IF_REQUESTED(ADDI, m_ir_builder->getInt32(rd), m_ir_builder->getInt32(ra), m_ir_builder->getInt32(simm16));
+
 	if (ra == 0) {
 		SetGpr(rd, m_ir_builder->getInt64((s64)simm16));
 	}
@@ -1734,6 +1813,8 @@ void Compiler::ADDI(u32 rd, u32 ra, s32 simm16) {
 }
 
 void Compiler::ADDIS(u32 rd, u32 ra, s32 simm16) {
+	USE_INTERP_IF_REQUESTED(ADDIS, m_ir_builder->getInt32(rd), m_ir_builder->getInt32(ra), m_ir_builder->getInt32(simm16));
+
 	if (ra == 0) {
 		SetGpr(rd, m_ir_builder->getInt64((s64)simm16 << 16));
 	}
@@ -1751,42 +1832,50 @@ void Compiler::BC(u32 bo, u32 bi, s32 bd, u32 aa, u32 lk) {
 }
 
 void Compiler::HACK(u32 index) {
-	Call<void>("execute_ppu_func_by_index", &execute_ppu_func_by_index, m_state.args[CompileTaskState::Args::State], m_ir_builder->getInt32(index & EIF_USE_BRANCH ? index : index & ~EIF_PERFORM_BLR));
+	llvm::Value *status = Call<u32>("wrappedExecutePPUFuncByIndex", m_state.args[CompileTaskState::Args::State], m_ir_builder->getInt32(index & EIF_USE_BRANCH ? index : index & ~EIF_PERFORM_BLR));
+	llvm::BasicBlock *cputhreadexitblock = GetBasicBlockFromAddress(m_state.current_instruction_address, "early_exit");
+	llvm::Value *isCPUThreadExit = m_ir_builder->CreateICmpEQ(status, m_ir_builder->getInt32(ExecutionStatus::ExecutionStatusPropagateException));
+	llvm::BasicBlock *normal_execution  = GetBasicBlockFromAddress(m_state.current_instruction_address, "normal_execution");
+	m_ir_builder->CreateCondBr(isCPUThreadExit, cputhreadexitblock, normal_execution);
+	m_ir_builder->SetInsertPoint(cputhreadexitblock);
+	m_ir_builder->CreateRet(m_ir_builder->getInt32(ExecutionStatus::ExecutionStatusPropagateException));
+
+	m_ir_builder->SetInsertPoint(normal_execution);
 	if (index & EIF_PERFORM_BLR || index & EIF_USE_BRANCH) {
 		auto lr_i32 = index & EIF_USE_BRANCH ? GetPc() : m_ir_builder->CreateTrunc(m_ir_builder->CreateAnd(GetLr(), ~0x3ULL), m_ir_builder->getInt32Ty());
 		CreateBranch(nullptr, lr_i32, false, (index & EIF_USE_BRANCH) == 0);
 	}
-	// copied from Compiler::SC()
-	//auto ret_i1   = Call<bool>("PollStatus", m_poll_status_function, m_state.args[CompileTaskState::Args::State]);
-	//auto cmp_i1   = m_ir_builder->CreateICmpEQ(ret_i1, m_ir_builder->getInt1(true));
-	//auto then_bb  = GetBasicBlockFromAddress(m_state.current_instruction_address, "then_true");
-	//auto merge_bb = GetBasicBlockFromAddress(m_state.current_instruction_address, "merge_true");
-	//m_ir_builder->CreateCondBr(cmp_i1, then_bb, merge_bb);
-	//m_ir_builder->SetInsertPoint(then_bb);
-	//m_ir_builder->CreateRet(m_ir_builder->getInt32(0xFFFFFFFF));
-	//m_ir_builder->SetInsertPoint(merge_bb);
 }
 
 void Compiler::SC(u32 lev) {
 	switch (lev) {
 	case 0:
-		Call<void>("SysCalls.DoSyscall", SysCalls::DoSyscall, m_state.args[CompileTaskState::Args::State], GetGpr(11));
+		{
+		llvm::Value *status = Call<u32>("wrappedDoSyscall", m_state.args[CompileTaskState::Args::State], GetGpr(11));
+		llvm::BasicBlock *cputhreadexitblock = GetBasicBlockFromAddress(m_state.current_instruction_address, "early_exit");
+		llvm::Value *isCPUThreadExit = m_ir_builder->CreateICmpEQ(status, m_ir_builder->getInt32(ExecutionStatus::ExecutionStatusPropagateException));
+		llvm::BasicBlock *normal_execution = GetBasicBlockFromAddress(m_state.current_instruction_address, "normal_execution");
+		m_ir_builder->CreateCondBr(isCPUThreadExit, cputhreadexitblock, normal_execution);
+		m_ir_builder->SetInsertPoint(cputhreadexitblock);
+		m_ir_builder->CreateRet(m_ir_builder->getInt32(ExecutionStatus::ExecutionStatusPropagateException));
+		m_ir_builder->SetInsertPoint(normal_execution);
+		}
 		break;
 	case 3:
-		Call<void>("PPUThread.FastStop", &PPUThread::fast_stop, m_state.args[CompileTaskState::Args::State]);
+		Call<void>("PPUThread.fast_stop", m_state.args[CompileTaskState::Args::State]);
 		break;
 	default:
-		CompilationError(fmt::Format("SC %u", lev));
+		CompilationError(fmt::format("SC %u", lev));
 		break;
 	}
 
-	auto ret_i1 = Call<bool>("PollStatus", m_poll_status_function, m_state.args[CompileTaskState::Args::State]);
+	auto ret_i1 = Call<bool>("PollStatus", m_state.args[CompileTaskState::Args::State]);
 	auto cmp_i1 = m_ir_builder->CreateICmpEQ(ret_i1, m_ir_builder->getInt1(true));
 	auto then_bb = GetBasicBlockFromAddress(m_state.current_instruction_address, "then_true");
 	auto merge_bb = GetBasicBlockFromAddress(m_state.current_instruction_address, "merge_true");
 	m_ir_builder->CreateCondBr(cmp_i1, then_bb, merge_bb);
 	m_ir_builder->SetInsertPoint(then_bb);
-	m_ir_builder->CreateRet(m_ir_builder->getInt32(0xFFFFFFFF));
+	m_ir_builder->CreateRet(m_ir_builder->getInt32(ExecutionStatus::ExecutionStatusBlockEnded));
 	m_ir_builder->SetInsertPoint(merge_bb);
 }
 
@@ -1797,6 +1886,8 @@ void Compiler::B(s32 ll, u32 aa, u32 lk) {
 }
 
 void Compiler::MCRF(u32 crfd, u32 crfs) {
+	USE_INTERP_IF_REQUESTED(MCRF, m_ir_builder->getInt32(crfd), m_ir_builder->getInt32(crfs));
+
 	if (crfd != crfs) {
 		auto cr_i32 = GetCr();
 		auto crf_i32 = GetNibble(cr_i32, crfs);
@@ -1813,6 +1904,8 @@ void Compiler::BCLR(u32 bo, u32 bi, u32 bh, u32 lk) {
 }
 
 void Compiler::CRNOR(u32 crbd, u32 crba, u32 crbb) {
+	USE_INTERP_IF_REQUESTED(CRNOR, m_ir_builder->getInt32(crbd), m_ir_builder->getInt32(crba), m_ir_builder->getInt32(crbb));
+
 	auto cr_i32 = GetCr();
 	auto ba_i32 = GetBit(cr_i32, crba);
 	auto bb_i32 = GetBit(cr_i32, crbb);
@@ -1823,6 +1916,8 @@ void Compiler::CRNOR(u32 crbd, u32 crba, u32 crbb) {
 }
 
 void Compiler::CRANDC(u32 crbd, u32 crba, u32 crbb) {
+	USE_INTERP_IF_REQUESTED(CRANDC, m_ir_builder->getInt32(crbd), m_ir_builder->getInt32(crba), m_ir_builder->getInt32(crbb));
+
 	auto cr_i32 = GetCr();
 	auto ba_i32 = GetBit(cr_i32, crba);
 	auto bb_i32 = GetBit(cr_i32, crbb);
@@ -1837,6 +1932,8 @@ void Compiler::ISYNC() {
 }
 
 void Compiler::CRXOR(u32 crbd, u32 crba, u32 crbb) {
+	USE_INTERP_IF_REQUESTED(CRXOR, m_ir_builder->getInt32(crbd), m_ir_builder->getInt32(crba), m_ir_builder->getInt32(crbb));
+
 	auto cr_i32 = GetCr();
 	auto ba_i32 = GetBit(cr_i32, crba);
 	auto bb_i32 = GetBit(cr_i32, crbb);
@@ -1851,6 +1948,8 @@ void Compiler::DCBI(u32 ra, u32 rb) {
 }
 
 void Compiler::CRNAND(u32 crbd, u32 crba, u32 crbb) {
+	USE_INTERP_IF_REQUESTED(CRNAND, m_ir_builder->getInt32(crbd), m_ir_builder->getInt32(crba), m_ir_builder->getInt32(crbb));
+
 	auto cr_i32 = GetCr();
 	auto ba_i32 = GetBit(cr_i32, crba);
 	auto bb_i32 = GetBit(cr_i32, crbb);
@@ -1861,6 +1960,8 @@ void Compiler::CRNAND(u32 crbd, u32 crba, u32 crbb) {
 }
 
 void Compiler::CRAND(u32 crbd, u32 crba, u32 crbb) {
+	USE_INTERP_IF_REQUESTED(CRAND, m_ir_builder->getInt32(crbd), m_ir_builder->getInt32(crba), m_ir_builder->getInt32(crbb));
+
 	auto cr_i32 = GetCr();
 	auto ba_i32 = GetBit(cr_i32, crba);
 	auto bb_i32 = GetBit(cr_i32, crbb);
@@ -1870,6 +1971,8 @@ void Compiler::CRAND(u32 crbd, u32 crba, u32 crbb) {
 }
 
 void Compiler::CREQV(u32 crbd, u32 crba, u32 crbb) {
+	USE_INTERP_IF_REQUESTED(CREQV, m_ir_builder->getInt32(crbd), m_ir_builder->getInt32(crba), m_ir_builder->getInt32(crbb));
+
 	auto cr_i32 = GetCr();
 	auto ba_i32 = GetBit(cr_i32, crba);
 	auto bb_i32 = GetBit(cr_i32, crbb);
@@ -1880,6 +1983,8 @@ void Compiler::CREQV(u32 crbd, u32 crba, u32 crbb) {
 }
 
 void Compiler::CRORC(u32 crbd, u32 crba, u32 crbb) {
+	USE_INTERP_IF_REQUESTED(CRORC, m_ir_builder->getInt32(crbd), m_ir_builder->getInt32(crba), m_ir_builder->getInt32(crbb));
+
 	auto cr_i32 = GetCr();
 	auto ba_i32 = GetBit(cr_i32, crba);
 	auto bb_i32 = GetBit(cr_i32, crbb);
@@ -1890,6 +1995,8 @@ void Compiler::CRORC(u32 crbd, u32 crba, u32 crbb) {
 }
 
 void Compiler::CROR(u32 crbd, u32 crba, u32 crbb) {
+	USE_INTERP_IF_REQUESTED(CROR, m_ir_builder->getInt32(crbd), m_ir_builder->getInt32(crba), m_ir_builder->getInt32(crbb));
+
 	auto cr_i32 = GetCr();
 	auto ba_i32 = GetBit(cr_i32, crba);
 	auto bb_i32 = GetBit(cr_i32, crbb);
@@ -1906,6 +2013,8 @@ void Compiler::BCCTR(u32 bo, u32 bi, u32 bh, u32 lk) {
 }
 
 void Compiler::RLWIMI(u32 ra, u32 rs, u32 sh, u32 mb, u32 me, u32 rc) {
+	USE_INTERP_IF_REQUESTED(RLWIMI, m_ir_builder->getInt32(ra), m_ir_builder->getInt32(rs), m_ir_builder->getInt32(sh), m_ir_builder->getInt32(mb), m_ir_builder->getInt32(me), m_ir_builder->getInt32(rc));
+
 	auto rs_i32 = GetGpr(rs, 32);
 	auto rs_i64 = m_ir_builder->CreateZExt(rs_i32, m_ir_builder->getInt64Ty());
 	auto rsh_i64 = m_ir_builder->CreateShl(rs_i64, 32);
@@ -1930,6 +2039,8 @@ void Compiler::RLWIMI(u32 ra, u32 rs, u32 sh, u32 mb, u32 me, u32 rc) {
 }
 
 void Compiler::RLWINM(u32 ra, u32 rs, u32 sh, u32 mb, u32 me, u32 rc) {
+	USE_INTERP_IF_REQUESTED(RLWINM, m_ir_builder->getInt32(ra), m_ir_builder->getInt32(rs), m_ir_builder->getInt32(sh), m_ir_builder->getInt32(mb), m_ir_builder->getInt32(me), m_ir_builder->getInt32(rc));
+
 	auto rs_i32 = GetGpr(rs, 32);
 	auto rs_i64 = m_ir_builder->CreateZExt(rs_i32, m_ir_builder->getInt64Ty());
 	auto rsh_i64 = m_ir_builder->CreateShl(rs_i64, 32);
@@ -1950,6 +2061,8 @@ void Compiler::RLWINM(u32 ra, u32 rs, u32 sh, u32 mb, u32 me, u32 rc) {
 }
 
 void Compiler::RLWNM(u32 ra, u32 rs, u32 rb, u32 mb, u32 me, u32 rc) {
+	USE_INTERP_IF_REQUESTED(RLWNM, m_ir_builder->getInt32(ra), m_ir_builder->getInt32(rs), m_ir_builder->getInt32(rb), m_ir_builder->getInt32(mb), m_ir_builder->getInt32(me), m_ir_builder->getInt32(rc));
+
 	auto rs_i32 = GetGpr(rs, 32);
 	auto rs_i64 = m_ir_builder->CreateZExt(rs_i32, m_ir_builder->getInt64Ty());
 	auto rsh_i64 = m_ir_builder->CreateShl(rs_i64, 32);
@@ -1969,30 +2082,40 @@ void Compiler::RLWNM(u32 ra, u32 rs, u32 rb, u32 mb, u32 me, u32 rc) {
 }
 
 void Compiler::ORI(u32 ra, u32 rs, u32 uimm16) {
+	USE_INTERP_IF_REQUESTED(ORI, m_ir_builder->getInt32(ra), m_ir_builder->getInt32(rs), m_ir_builder->getInt32(uimm16));
+
 	auto rs_i64 = GetGpr(rs);
 	auto res_i64 = m_ir_builder->CreateOr(rs_i64, uimm16);
 	SetGpr(ra, res_i64);
 }
 
 void Compiler::ORIS(u32 ra, u32 rs, u32 uimm16) {
+	USE_INTERP_IF_REQUESTED(ORIS, m_ir_builder->getInt32(ra), m_ir_builder->getInt32(rs), m_ir_builder->getInt32(uimm16));
+
 	auto rs_i64 = GetGpr(rs);
 	auto res_i64 = m_ir_builder->CreateOr(rs_i64, (u64)uimm16 << 16);
 	SetGpr(ra, res_i64);
 }
 
 void Compiler::XORI(u32 ra, u32 rs, u32 uimm16) {
+	USE_INTERP_IF_REQUESTED(XORI, m_ir_builder->getInt32(ra), m_ir_builder->getInt32(rs), m_ir_builder->getInt32(uimm16));
+
 	auto rs_i64 = GetGpr(rs);
 	auto res_i64 = m_ir_builder->CreateXor(rs_i64, uimm16);
 	SetGpr(ra, res_i64);
 }
 
 void Compiler::XORIS(u32 ra, u32 rs, u32 uimm16) {
+	USE_INTERP_IF_REQUESTED(XORIS, m_ir_builder->getInt32(ra), m_ir_builder->getInt32(rs), m_ir_builder->getInt32(uimm16));
+
 	auto rs_i64 = GetGpr(rs);
 	auto res_i64 = m_ir_builder->CreateXor(rs_i64, (u64)uimm16 << 16);
 	SetGpr(ra, res_i64);
 }
 
 void Compiler::ANDI_(u32 ra, u32 rs, u32 uimm16) {
+	USE_INTERP_IF_REQUESTED(ANDI_, m_ir_builder->getInt32(ra), m_ir_builder->getInt32(rs), m_ir_builder->getInt32(uimm16));
+
 	auto rs_i64 = GetGpr(rs);
 	auto res_i64 = m_ir_builder->CreateAnd(rs_i64, uimm16);
 	SetGpr(ra, res_i64);
@@ -2000,6 +2123,8 @@ void Compiler::ANDI_(u32 ra, u32 rs, u32 uimm16) {
 }
 
 void Compiler::ANDIS_(u32 ra, u32 rs, u32 uimm16) {
+	USE_INTERP_IF_REQUESTED(ANDIS_, m_ir_builder->getInt32(ra), m_ir_builder->getInt32(rs), m_ir_builder->getInt32(uimm16));
+
 	auto rs_i64 = GetGpr(rs);
 	auto res_i64 = m_ir_builder->CreateAnd(rs_i64, (u64)uimm16 << 16);
 	SetGpr(ra, res_i64);
@@ -2007,6 +2132,8 @@ void Compiler::ANDIS_(u32 ra, u32 rs, u32 uimm16) {
 }
 
 void Compiler::RLDICL(u32 ra, u32 rs, u32 sh, u32 mb, u32 rc) {
+	USE_INTERP_IF_REQUESTED(RLDICL, m_ir_builder->getInt32(ra), m_ir_builder->getInt32(rs), m_ir_builder->getInt32(sh), m_ir_builder->getInt32(mb), m_ir_builder->getInt32(rc));
+
 	auto rs_i64 = GetGpr(rs);
 	auto res_i64 = rs_i64;
 	if (sh) {
@@ -2024,6 +2151,8 @@ void Compiler::RLDICL(u32 ra, u32 rs, u32 sh, u32 mb, u32 rc) {
 }
 
 void Compiler::RLDICR(u32 ra, u32 rs, u32 sh, u32 me, u32 rc) {
+	USE_INTERP_IF_REQUESTED(RLDICR, m_ir_builder->getInt32(ra), m_ir_builder->getInt32(rs), m_ir_builder->getInt32(sh), m_ir_builder->getInt32(me), m_ir_builder->getInt32(rc));
+
 	auto rs_i64 = GetGpr(rs);
 	auto res_i64 = rs_i64;
 	if (sh) {
@@ -2041,6 +2170,8 @@ void Compiler::RLDICR(u32 ra, u32 rs, u32 sh, u32 me, u32 rc) {
 }
 
 void Compiler::RLDIC(u32 ra, u32 rs, u32 sh, u32 mb, u32 rc) {
+	USE_INTERP_IF_REQUESTED(RLDIC, m_ir_builder->getInt32(ra), m_ir_builder->getInt32(rs), m_ir_builder->getInt32(sh), m_ir_builder->getInt32(mb), m_ir_builder->getInt32(rc));
+
 	auto rs_i64 = GetGpr(rs);
 	auto res_i64 = rs_i64;
 	if (sh) {
@@ -2058,6 +2189,8 @@ void Compiler::RLDIC(u32 ra, u32 rs, u32 sh, u32 mb, u32 rc) {
 }
 
 void Compiler::RLDIMI(u32 ra, u32 rs, u32 sh, u32 mb, u32 rc) {
+	USE_INTERP_IF_REQUESTED(RLDIMI, m_ir_builder->getInt32(ra), m_ir_builder->getInt32(rs), m_ir_builder->getInt32(sh), m_ir_builder->getInt32(mb), m_ir_builder->getInt32(rc));
+
 	auto rs_i64 = GetGpr(rs);
 	auto ra_i64 = GetGpr(ra);
 	auto res_i64 = rs_i64;
@@ -2079,6 +2212,8 @@ void Compiler::RLDIMI(u32 ra, u32 rs, u32 sh, u32 mb, u32 rc) {
 }
 
 void Compiler::RLDC_LR(u32 ra, u32 rs, u32 rb, u32 m_eb, u32 is_r, u32 rc) {
+	USE_INTERP_IF_REQUESTED(RLDC_LR, m_ir_builder->getInt32(ra), m_ir_builder->getInt32(rs), m_ir_builder->getInt32(rb), m_ir_builder->getInt32(m_eb), m_ir_builder->getInt32(is_r), m_ir_builder->getInt32(rc));
+
 	auto rs_i64 = GetGpr(rs);
 	auto rb_i64 = GetGpr(rb);
 	auto shl_i64 = m_ir_builder->CreateAnd(rb_i64, 0x3F);
@@ -2102,6 +2237,8 @@ void Compiler::RLDC_LR(u32 ra, u32 rs, u32 rb, u32 m_eb, u32 is_r, u32 rc) {
 }
 
 void Compiler::CMP(u32 crfd, u32 l, u32 ra, u32 rb) {
+	USE_INTERP_IF_REQUESTED(CMP, m_ir_builder->getInt32(crfd), m_ir_builder->getInt32(l), m_ir_builder->getInt32(ra), m_ir_builder->getInt32(rb));
+
 	Value * ra_i64;
 	Value * rb_i64;
 	if (l == 0) {
@@ -2117,11 +2254,39 @@ void Compiler::CMP(u32 crfd, u32 l, u32 ra, u32 rb) {
 }
 
 void Compiler::TW(u32 to, u32 ra, u32 rb) {
-	CompilationError("TW");
+	llvm::Value *gpr_a = GetGpr(ra, 32);
+	llvm::Value *gpr_b = GetGpr(rb, 32);
+	llvm::Value *trap_condition = m_ir_builder->getFalse();
+
+	if (to & 0x10)
+		trap_condition = m_ir_builder->CreateOr(trap_condition,
+			m_ir_builder->CreateICmpSLT(gpr_a, gpr_b));
+	if (to & 0x8)
+		trap_condition = m_ir_builder->CreateOr(trap_condition,
+			m_ir_builder->CreateICmpSGT(gpr_a, gpr_b));
+	if (to & 0x4)
+		trap_condition = m_ir_builder->CreateOr(trap_condition,
+			m_ir_builder->CreateICmpEQ(gpr_a, gpr_b));
+	if (to & 0x2)
+		trap_condition = m_ir_builder->CreateOr(trap_condition,
+			m_ir_builder->CreateICmpULT(gpr_a, gpr_b));
+	if (to & 0x1)
+		trap_condition = m_ir_builder->CreateOr(trap_condition,
+			m_ir_builder->CreateICmpUGT(gpr_a, gpr_b));
+
+	llvm::BasicBlock *trap_block = GetBasicBlockFromAddress(m_state.current_instruction_address, "trap_block");
+	llvm::BasicBlock *normal_execution = GetBasicBlockFromAddress(m_state.current_instruction_address, "normal_execution");
+	m_ir_builder->CreateCondBr(trap_condition, trap_block, normal_execution);
+
+	m_ir_builder->SetInsertPoint(trap_block);
+	Call<void>("trap");
+	m_ir_builder->CreateRet(m_ir_builder->getInt32(ExecutionStatus::ExecutionStatusPropagateException));
+
+	m_ir_builder->SetInsertPoint(normal_execution);
 }
 
 void Compiler::LVSL(u32 vd, u32 ra, u32 rb) {
-	static const u128 s_lvsl_values[] = {
+	static const u64 s_lvsl_values[0x10][2] = {
 	  { 0x08090A0B0C0D0E0F, 0x0001020304050607 },
 	  { 0x090A0B0C0D0E0F10, 0x0102030405060708 },
 	  { 0x0A0B0C0D0E0F1011, 0x0203040506070809 },
@@ -2236,12 +2401,16 @@ void Compiler::MULHWU(u32 rd, u32 ra, u32 rb, u32 rc) {
 }
 
 void Compiler::MFOCRF(u32 a, u32 rd, u32 crm) {
+	USE_INTERP_IF_REQUESTED(MFOCRF, m_ir_builder->getInt32(a), m_ir_builder->getInt32(rd), m_ir_builder->getInt32(crm));
+
 	auto cr_i32 = GetCr();
 	auto cr_i64 = m_ir_builder->CreateZExt(cr_i32, m_ir_builder->getInt64Ty());
 	SetGpr(rd, cr_i64);
 }
 
 void Compiler::LWARX(u32 rd, u32 ra, u32 rb) {
+	USE_INTERP_IF_REQUESTED(LWARX, m_ir_builder->getInt32(rd), m_ir_builder->getInt32(ra), m_ir_builder->getInt32(rb));
+
 	auto addr_i64 = GetGpr(rb);
 	if (ra) {
 		auto ra_i64 = GetGpr(ra);
@@ -2251,7 +2420,7 @@ void Compiler::LWARX(u32 rd, u32 ra, u32 rb) {
 	auto addr_i32 = m_ir_builder->CreateTrunc(addr_i64, m_ir_builder->getInt32Ty());
 	auto val_i32_ptr = m_ir_builder->CreateAlloca(m_ir_builder->getInt32Ty());
 	val_i32_ptr->setAlignment(4);
-	Call<bool>("vm.reservation_acquire", vm::reservation_acquire, m_ir_builder->CreateBitCast(val_i32_ptr, m_ir_builder->getInt8PtrTy()), addr_i32, m_ir_builder->getInt32(4));
+	Call<bool>("vm.reservation_acquire", m_ir_builder->CreateBitCast(val_i32_ptr, m_ir_builder->getInt8PtrTy()), addr_i32, m_ir_builder->getInt32(4));
 	auto val_i32 = (Value *)m_ir_builder->CreateLoad(val_i32_ptr);
 	val_i32 = m_ir_builder->CreateCall(Intrinsic::getDeclaration(m_module, Intrinsic::bswap, m_ir_builder->getInt32Ty()), val_i32);
 	auto val_i64 = m_ir_builder->CreateZExt(val_i32, m_ir_builder->getInt64Ty());
@@ -2324,6 +2493,8 @@ void Compiler::SLD(u32 ra, u32 rs, u32 rb, u32 rc) {
 }
 
 void Compiler::AND(u32 ra, u32 rs, u32 rb, u32 rc) {
+	USE_INTERP_IF_REQUESTED(AND, m_ir_builder->getInt32(ra), m_ir_builder->getInt32(rs), m_ir_builder->getInt32(rb), m_ir_builder->getInt32(rc));
+
 	auto rs_i64 = GetGpr(rs);
 	auto rb_i64 = GetGpr(rb);
 	auto res_i64 = m_ir_builder->CreateAnd(rs_i64, rb_i64);
@@ -2335,6 +2506,8 @@ void Compiler::AND(u32 ra, u32 rs, u32 rb, u32 rc) {
 }
 
 void Compiler::CMPL(u32 crfd, u32 l, u32 ra, u32 rb) {
+	USE_INTERP_IF_REQUESTED(CMPL, m_ir_builder->getInt32(crfd), m_ir_builder->getInt32(l), m_ir_builder->getInt32(ra), m_ir_builder->getInt32(rb));
+
 	Value * ra_i64;
 	Value * rb_i64;
 	if (l == 0) {
@@ -2350,7 +2523,7 @@ void Compiler::CMPL(u32 crfd, u32 l, u32 ra, u32 rb) {
 }
 
 void Compiler::LVSR(u32 vd, u32 ra, u32 rb) {
-	static const u128 s_lvsr_values[] = {
+	static const u64 s_lvsr_values[0x10][2] = {
 	  { 0x18191A1B1C1D1E1F, 0x1011121314151617 },
 	  { 0x1718191A1B1C1D1E, 0x0F10111213141516 },
 	  { 0x161718191A1B1C1D, 0x0E0F101112131415 },
@@ -2400,6 +2573,8 @@ void Compiler::LVEHX(u32 vd, u32 ra, u32 rb) {
 }
 
 void Compiler::SUBF(u32 rd, u32 ra, u32 rb, u32 oe, u32 rc) {
+	USE_INTERP_IF_REQUESTED(SUBF, m_ir_builder->getInt32(rd), m_ir_builder->getInt32(ra), m_ir_builder->getInt32(rb), m_ir_builder->getInt32(oe), m_ir_builder->getInt32(rc));
+
 	auto ra_i64 = GetGpr(ra);
 	auto rb_i64 = GetGpr(rb);
 	auto diff_i64 = m_ir_builder->CreateSub(rb_i64, ra_i64);
@@ -2464,7 +2639,8 @@ void Compiler::ANDC(u32 ra, u32 rs, u32 rb, u32 rc) {
 }
 
 void Compiler::TD(u32 to, u32 ra, u32 rb) {
-	CompilationError("TD");
+	Call<void>("trap");
+	m_ir_builder->CreateRet(m_ir_builder->getInt32(ExecutionStatus::ExecutionStatusPropagateException));
 }
 
 void Compiler::LVEWX(u32 vd, u32 ra, u32 rb) {
@@ -2523,7 +2699,7 @@ void Compiler::LDARX(u32 rd, u32 ra, u32 rb) {
 	auto addr_i32 = m_ir_builder->CreateTrunc(addr_i64, m_ir_builder->getInt32Ty());
 	auto val_i64_ptr = m_ir_builder->CreateAlloca(m_ir_builder->getInt64Ty());
 	val_i64_ptr->setAlignment(8);
-	Call<bool>("vm.reservation_acquire", vm::reservation_acquire, m_ir_builder->CreateBitCast(val_i64_ptr, m_ir_builder->getInt8PtrTy()), addr_i32, m_ir_builder->getInt32(8));
+	Call<bool>("vm.reservation_acquire", m_ir_builder->CreateBitCast(val_i64_ptr, m_ir_builder->getInt8PtrTy()), addr_i32, m_ir_builder->getInt32(8));
 	auto val_i64 = (Value *)m_ir_builder->CreateLoad(val_i64_ptr);
 	val_i64 = m_ir_builder->CreateCall(Intrinsic::getDeclaration(m_module, Intrinsic::bswap, m_ir_builder->getInt64Ty()), val_i64);
 	SetGpr(rd, val_i64);
@@ -2559,6 +2735,8 @@ void Compiler::LVX(u32 vd, u32 ra, u32 rb) {
 }
 
 void Compiler::NEG(u32 rd, u32 ra, u32 oe, u32 rc) {
+	USE_INTERP_IF_REQUESTED(NEG, m_ir_builder->getInt32(rd), m_ir_builder->getInt32(ra), m_ir_builder->getInt32(oe), m_ir_builder->getInt32(rc));
+
 	auto ra_i64 = GetGpr(ra);
 	auto diff_i64 = m_ir_builder->CreateSub(m_ir_builder->getInt64(0), ra_i64);
 	SetGpr(rd, diff_i64);
@@ -2660,6 +2838,8 @@ void Compiler::ADDE(u32 rd, u32 ra, u32 rb, u32 oe, u32 rc) {
 }
 
 void Compiler::MTOCRF(u32 l, u32 crm, u32 rs) {
+	USE_INTERP_IF_REQUESTED(MTOCRF, m_ir_builder->getInt32(l), m_ir_builder->getInt32(crm), m_ir_builder->getInt32(rs));
+
 	auto rs_i32 = GetGpr(rs, 32);
 	auto cr_i32 = GetCr();
 	u32  mask = 0;
@@ -2690,6 +2870,8 @@ void Compiler::STDX(u32 rs, u32 ra, u32 rb) {
 }
 
 void Compiler::STWCX_(u32 rs, u32 ra, u32 rb) {
+	USE_INTERP_IF_REQUESTED(STWCX_, m_ir_builder->getInt32(rs), m_ir_builder->getInt32(ra), m_ir_builder->getInt32(rb));
+
 	auto addr_i64 = GetGpr(rb);
 	if (ra) {
 		auto ra_i64 = GetGpr(ra);
@@ -2702,7 +2884,7 @@ void Compiler::STWCX_(u32 rs, u32 ra, u32 rb) {
 	auto rs_i32_ptr = m_ir_builder->CreateAlloca(m_ir_builder->getInt32Ty());
 	rs_i32_ptr->setAlignment(4);
 	m_ir_builder->CreateStore(rs_i32, rs_i32_ptr);
-	auto success_i1 = Call<bool>("vm.reservation_update", vm::reservation_update, addr_i32, m_ir_builder->CreateBitCast(rs_i32_ptr, m_ir_builder->getInt8PtrTy()), m_ir_builder->getInt32(4));
+	auto success_i1 = Call<bool>("vm.reservation_update", addr_i32, m_ir_builder->CreateBitCast(rs_i32_ptr, m_ir_builder->getInt8PtrTy()), m_ir_builder->getInt32(4));
 
 	auto cr_i32 = GetCr();
 	cr_i32 = SetBit(cr_i32, 2, success_i1);
@@ -2821,7 +3003,7 @@ void Compiler::STDCX_(u32 rs, u32 ra, u32 rb) {
 	auto rs_i64_ptr = m_ir_builder->CreateAlloca(m_ir_builder->getInt64Ty());
 	rs_i64_ptr->setAlignment(8);
 	m_ir_builder->CreateStore(rs_i64, rs_i64_ptr);
-	auto success_i1 = Call<bool>("vm.reservation_update", vm::reservation_update, addr_i32, m_ir_builder->CreateBitCast(rs_i64_ptr, m_ir_builder->getInt8PtrTy()), m_ir_builder->getInt32(8));
+	auto success_i1 = Call<bool>("vm.reservation_update", addr_i32, m_ir_builder->CreateBitCast(rs_i64_ptr, m_ir_builder->getInt8PtrTy()), m_ir_builder->getInt32(8));
 
 	auto cr_i32 = GetCr();
 	cr_i32 = SetBit(cr_i32, 2, success_i1);
@@ -2913,6 +3095,8 @@ void Compiler::ADDME(u32 rd, u32 ra, u32 oe, u32 rc) {
 }
 
 void Compiler::MULLW(u32 rd, u32 ra, u32 rb, u32 oe, u32 rc) {
+	USE_INTERP_IF_REQUESTED(MULLW, m_ir_builder->getInt32(rd), m_ir_builder->getInt32(ra), m_ir_builder->getInt32(rb), m_ir_builder->getInt32(oe), m_ir_builder->getInt32(rc));
+
 	auto ra_i32 = GetGpr(ra, 32);
 	auto rb_i32 = GetGpr(rb, 32);
 	auto ra_i64 = m_ir_builder->CreateSExt(ra_i32, m_ir_builder->getInt64Ty());
@@ -2945,6 +3129,8 @@ void Compiler::STBUX(u32 rs, u32 ra, u32 rb) {
 }
 
 void Compiler::ADD(u32 rd, u32 ra, u32 rb, u32 oe, u32 rc) {
+	USE_INTERP_IF_REQUESTED(ADD, m_ir_builder->getInt32(rd), m_ir_builder->getInt32(ra), m_ir_builder->getInt32(rb), m_ir_builder->getInt32(oe), m_ir_builder->getInt32(rc));
+
 	auto ra_i64 = GetGpr(ra);
 	auto rb_i64 = GetGpr(rb);
 	auto sum_i64 = m_ir_builder->CreateAdd(ra_i64, rb_i64);
@@ -3042,10 +3228,10 @@ void Compiler::MFSPR(u32 rd, u32 spr) {
 		rd_i64 = GetVrsave();
 		break;
 	case 0x10C:
-		rd_i64 = Call<u64>("get_timebased_time", get_timebased_time);
+		rd_i64 = Call<u64>("get_timebased_time");
 		break;
 	case 0x10D:
-		rd_i64 = Call<u64>("get_timebased_time", get_timebased_time);
+		rd_i64 = Call<u64>("get_timebased_time");
 		rd_i64 = m_ir_builder->CreateLShr(rd_i64, 32);
 		break;
 	default:
@@ -3090,7 +3276,7 @@ void Compiler::LVXL(u32 vd, u32 ra, u32 rb) {
 }
 
 void Compiler::MFTB(u32 rd, u32 spr) {
-	auto tb_i64 = Call<u64>("get_timebased_time", get_timebased_time);
+	auto tb_i64 = Call<u64>("get_timebased_time");
 
 	u32 n = (spr >> 5) | ((spr & 0x1f) << 5);
 	if (n == 0x10D) {
@@ -3170,6 +3356,8 @@ void Compiler::STHUX(u32 rs, u32 ra, u32 rb) {
 }
 
 void Compiler::OR(u32 ra, u32 rs, u32 rb, u32 rc) {
+	USE_INTERP_IF_REQUESTED(OR, m_ir_builder->getInt32(ra), m_ir_builder->getInt32(rs), m_ir_builder->getInt32(rb), m_ir_builder->getInt32(rc));
+
 	auto rs_i64 = GetGpr(rs);
 	auto rb_i64 = GetGpr(rb);
 	auto res_i64 = m_ir_builder->CreateOr(rs_i64, rb_i64);
@@ -3199,6 +3387,8 @@ void Compiler::DIVDU(u32 rd, u32 ra, u32 rb, u32 oe, u32 rc) {
 }
 
 void Compiler::DIVWU(u32 rd, u32 ra, u32 rb, u32 oe, u32 rc) {
+	USE_INTERP_IF_REQUESTED(DIVWU, m_ir_builder->getInt32(rd), m_ir_builder->getInt32(ra), m_ir_builder->getInt32(rb), m_ir_builder->getInt32(oe), m_ir_builder->getInt32(rc));
+
 	auto ra_i32 = GetGpr(ra, 32);
 	auto rb_i32 = GetGpr(rb, 32);
 	auto res_i32 = m_ir_builder->CreateUDiv(ra_i32, rb_i32);
@@ -3275,6 +3465,8 @@ void Compiler::DIVD(u32 rd, u32 ra, u32 rb, u32 oe, u32 rc) {
 }
 
 void Compiler::DIVW(u32 rd, u32 ra, u32 rb, u32 oe, u32 rc) {
+	USE_INTERP_IF_REQUESTED(DIVW, m_ir_builder->getInt32(rd), m_ir_builder->getInt32(ra), m_ir_builder->getInt32(rb), m_ir_builder->getInt32(oe), m_ir_builder->getInt32(rc));
+
 	auto ra_i32 = GetGpr(ra, 32);
 	auto rb_i32 = GetGpr(rb, 32);
 	auto res_i32 = m_ir_builder->CreateSDiv(ra_i32, rb_i32);
@@ -3460,7 +3652,7 @@ void Compiler::STVLX(u32 vs, u32 ra, u32 rb) {
 	auto index_i64 = m_ir_builder->CreateAnd(addr_i64, 0xf);
 	auto size_i64 = m_ir_builder->CreateSub(m_ir_builder->getInt64(16), index_i64);
 	addr_i64 = m_ir_builder->CreateAnd(addr_i64, 0xFFFFFFFF);
-	addr_i64 = m_ir_builder->CreateAdd(addr_i64, m_ir_builder->getInt64((u64)vm::get_ptr<u8>(0)));
+	addr_i64 = m_ir_builder->CreateAdd(addr_i64, m_ir_builder->getInt64((u64)vm::base(0)));
 	auto addr_i8_ptr = m_ir_builder->CreateIntToPtr(addr_i64, m_ir_builder->getInt8PtrTy());
 
 	auto vs_i128 = GetVr(vs);
@@ -3520,7 +3712,7 @@ void Compiler::STVRX(u32 vs, u32 ra, u32 rb) {
 	auto size_i64 = m_ir_builder->CreateAnd(addr_i64, 0xf);
 	auto index_i64 = m_ir_builder->CreateSub(m_ir_builder->getInt64(16), size_i64);
 	addr_i64 = m_ir_builder->CreateAnd(addr_i64, 0xFFFFFFF0);
-	addr_i64 = m_ir_builder->CreateAdd(addr_i64, m_ir_builder->getInt64((u64)vm::get_ptr<u8>(0)));
+	addr_i64 = m_ir_builder->CreateAdd(addr_i64, m_ir_builder->getInt64((u64)vm::base(0)));
 	auto addr_i8_ptr = m_ir_builder->CreateIntToPtr(addr_i64, m_ir_builder->getInt8PtrTy());
 
 	auto vs_i128 = GetVr(vs);
@@ -3673,6 +3865,8 @@ void Compiler::DSS(u32 strm, u32 a) {
 }
 
 void Compiler::SRAWI(u32 ra, u32 rs, u32 sh, u32 rc) {
+	USE_INTERP_IF_REQUESTED(SRAWI, m_ir_builder->getInt32(ra), m_ir_builder->getInt32(rs), m_ir_builder->getInt32(sh), m_ir_builder->getInt32(rc));
+
 	auto rs_i32 = GetGpr(rs, 32);
 	auto rs_i64 = m_ir_builder->CreateZExt(rs_i32, m_ir_builder->getInt64Ty());
 	rs_i64 = m_ir_builder->CreateShl(rs_i64, 32);
@@ -3748,6 +3942,8 @@ void Compiler::STVRXL(u32 vs, u32 ra, u32 rb) {
 }
 
 void Compiler::EXTSB(u32 ra, u32 rs, u32 rc) {
+	USE_INTERP_IF_REQUESTED(EXTSB, m_ir_builder->getInt32(ra), m_ir_builder->getInt32(rs), m_ir_builder->getInt32(rc));
+
 	auto rs_i8 = GetGpr(rs, 8);
 	auto rs_i64 = m_ir_builder->CreateSExt(rs_i8, m_ir_builder->getInt64Ty());
 	SetGpr(ra, rs_i64);
@@ -3770,6 +3966,8 @@ void Compiler::STFIWX(u32 frs, u32 ra, u32 rb) {
 }
 
 void Compiler::EXTSW(u32 ra, u32 rs, u32 rc) {
+	USE_INTERP_IF_REQUESTED(EXTSW, m_ir_builder->getInt32(ra), m_ir_builder->getInt32(rs), m_ir_builder->getInt32(rc));
+
 	auto rs_i32 = GetGpr(rs, 32);
 	auto rs_i64 = m_ir_builder->CreateSExt(rs_i32, m_ir_builder->getInt64Ty());
 	SetGpr(ra, rs_i64);
@@ -3792,7 +3990,7 @@ void Compiler::DCBZ(u32 ra, u32 rb) {
 	}
 
 	addr_i64 = m_ir_builder->CreateAnd(addr_i64, ~(127ULL));
-	addr_i64 = m_ir_builder->CreateAdd(addr_i64, m_ir_builder->getInt64((u64)vm::get_ptr<u8>(0)));
+	addr_i64 = m_ir_builder->CreateAdd(addr_i64, m_ir_builder->getInt64((u64)vm::base(0)));
 	auto addr_i8_ptr = m_ir_builder->CreateIntToPtr(addr_i64, m_ir_builder->getInt8PtrTy());
 
 	std::vector<Type *> types = { (Type *)m_ir_builder->getInt8PtrTy(), (Type *)m_ir_builder->getInt32Ty() };
@@ -3801,6 +3999,8 @@ void Compiler::DCBZ(u32 ra, u32 rb) {
 }
 
 void Compiler::LWZ(u32 rd, u32 ra, s32 d) {
+	USE_INTERP_IF_REQUESTED(LWZ, m_ir_builder->getInt32(rd), m_ir_builder->getInt32(ra), m_ir_builder->getInt32(d));
+
 	auto addr_i64 = (Value *)m_ir_builder->getInt64((s64)d);
 	if (ra) {
 		auto ra_i64 = GetGpr(ra);
@@ -3824,6 +4024,8 @@ void Compiler::LWZU(u32 rd, u32 ra, s32 d) {
 }
 
 void Compiler::LBZ(u32 rd, u32 ra, s32 d) {
+	USE_INTERP_IF_REQUESTED(LBZ, m_ir_builder->getInt32(rd), m_ir_builder->getInt32(ra), m_ir_builder->getInt32(d));
+
 	auto addr_i64 = (Value *)m_ir_builder->getInt64((s64)d);
 	if (ra) {
 		auto ra_i64 = GetGpr(ra);
@@ -3847,6 +4049,8 @@ void Compiler::LBZU(u32 rd, u32 ra, s32 d) {
 }
 
 void Compiler::STW(u32 rs, u32 ra, s32 d) {
+	USE_INTERP_IF_REQUESTED(STW, m_ir_builder->getInt32(rs), m_ir_builder->getInt32(ra), m_ir_builder->getInt32(d));
+
 	auto addr_i64 = (Value *)m_ir_builder->getInt64((s64)d);
 	if (ra) {
 		auto ra_i64 = GetGpr(ra);
@@ -3885,6 +4089,8 @@ void Compiler::STBU(u32 rs, u32 ra, s32 d) {
 }
 
 void Compiler::LHZ(u32 rd, u32 ra, s32 d) {
+	USE_INTERP_IF_REQUESTED(LHZ, m_ir_builder->getInt32(rd), m_ir_builder->getInt32(ra), m_ir_builder->getInt32(d));
+
 	auto addr_i64 = (Value *)m_ir_builder->getInt64((s64)d);
 	if (ra) {
 		auto ra_i64 = GetGpr(ra);
@@ -3977,6 +4183,8 @@ void Compiler::STMW(u32 rs, u32 ra, s32 d) {
 }
 
 void Compiler::LFS(u32 frd, u32 ra, s32 d) {
+	USE_INTERP_IF_REQUESTED(LFS, m_ir_builder->getInt32(frd), m_ir_builder->getInt32(ra), m_ir_builder->getInt32(d));
+
 	auto addr_i64 = (Value *)m_ir_builder->getInt64((s64)d);
 	if (ra) {
 		auto ra_i64 = GetGpr(ra);
@@ -4018,6 +4226,8 @@ void Compiler::LFDU(u32 frd, u32 ra, s32 ds) {
 }
 
 void Compiler::STFS(u32 frs, u32 ra, s32 d) {
+	USE_INTERP_IF_REQUESTED(STFS, m_ir_builder->getInt32(frs), m_ir_builder->getInt32(ra), m_ir_builder->getInt32(d));
+
 	auto addr_i64 = (Value *)m_ir_builder->getInt64((s64)d);
 	if (ra) {
 		auto ra_i64 = GetGpr(ra);
@@ -4060,6 +4270,8 @@ void Compiler::STFDU(u32 frs, u32 ra, s32 d) {
 }
 
 void Compiler::LD(u32 rd, u32 ra, s32 ds) {
+	USE_INTERP_IF_REQUESTED(LD, m_ir_builder->getInt32(rd), m_ir_builder->getInt32(ra), m_ir_builder->getInt32(ds));
+
 	auto addr_i64 = (Value *)m_ir_builder->getInt64((s64)ds);
 	if (ra) {
 		auto ra_i64 = GetGpr(ra);
@@ -4123,6 +4335,7 @@ void Compiler::FSUBS(u32 frd, u32 fra, u32 frb, u32 rc) {
 }
 
 void Compiler::FADDS(u32 frd, u32 fra, u32 frb, u32 rc) {
+
 	auto ra_f64 = GetFpr(fra);
 	auto rb_f64 = GetFpr(frb);
 	auto res_f64 = m_ir_builder->CreateFAdd(ra_f64, rb_f64);
@@ -4249,6 +4462,8 @@ void Compiler::FNMADDS(u32 frd, u32 fra, u32 frc, u32 frb, u32 rc) {
 }
 
 void Compiler::STD(u32 rs, u32 ra, s32 d) {
+	USE_INTERP_IF_REQUESTED(STD, m_ir_builder->getInt32(rs), m_ir_builder->getInt32(ra), m_ir_builder->getInt32(d));
+
 	auto addr_i64 = (Value *)m_ir_builder->getInt64((s64)d);
 	if (ra) {
 		auto ra_i64 = GetGpr(ra);
@@ -4259,6 +4474,8 @@ void Compiler::STD(u32 rs, u32 ra, s32 d) {
 }
 
 void Compiler::STDU(u32 rs, u32 ra, s32 ds) {
+	USE_INTERP_IF_REQUESTED(STDU, m_ir_builder->getInt32(rs), m_ir_builder->getInt32(ra), m_ir_builder->getInt32(ds));
+
 	auto addr_i64 = (Value *)m_ir_builder->getInt64((s64)ds);
 	auto ra_i64 = GetGpr(ra);
 	addr_i64 = m_ir_builder->CreateAdd(ra_i64, addr_i64);
@@ -4700,7 +4917,7 @@ void Compiler::FCFID(u32 frd, u32 frb, u32 rc) {
 }
 
 void Compiler::UNK(const u32 code, const u32 opcode, const u32 gcode) {
-	CompilationError(fmt::Format("Unknown/Illegal opcode! (0x%08x : 0x%x : 0x%x)", code, opcode, gcode));
+	CompilationError(fmt::format("Unknown/Illegal opcode! (0x%08x : 0x%x : 0x%x)", code, opcode, gcode));
 }
 
 std::string Compiler::GetBasicBlockNameFromAddress(u32 address, const std::string & suffix) const {
@@ -4713,7 +4930,7 @@ std::string Compiler::GetBasicBlockNameFromAddress(u32 address, const std::strin
 		name = "default_exit";
 	}
 	else {
-		name = fmt::Format("instr_0x%08X", address);
+		name = fmt::format("instr_0x%08X", address);
 	}
 
 	if (suffix != "") {
@@ -5197,7 +5414,21 @@ void Compiler::CreateBranch(llvm::Value * cmp_i1, llvm::Value * target_i32, bool
 			}
 
 			SetPc(target_i32);
-			IndirectCall(target_address, m_ir_builder->getInt64(0), true);
+//			Function *fn = m_module->getFunction(fmt::format("function_0x%08X", target_address));
+			llvm::Value *execStatus;
+//			if (fn)
+//				execStatus = m_ir_builder->CreateCall2(fn, m_state.args[CompileTaskState::Args::State], m_ir_builder->getInt64(0));
+//			else
+				execStatus = Call<u32>("execute_unknown_function", m_state.args[CompileTaskState::Args::State], m_ir_builder->getInt64(0));
+
+			llvm::BasicBlock *cputhreadexitblock = GetBasicBlockFromAddress(m_state.current_instruction_address, "early_exit");
+			llvm::Value *isCPUThreadExit = m_ir_builder->CreateICmpEQ(execStatus, m_ir_builder->getInt32(ExecutionStatus::ExecutionStatusPropagateException));
+			llvm::BasicBlock *normal_execution = GetBasicBlockFromAddress(m_state.current_instruction_address, "normal_execution");
+			m_ir_builder->CreateCondBr(isCPUThreadExit, cputhreadexitblock, normal_execution);
+			m_ir_builder->SetInsertPoint(cputhreadexitblock);
+			m_ir_builder->CreateRet(m_ir_builder->getInt32(ExecutionStatus::ExecutionStatusPropagateException));
+			m_ir_builder->SetInsertPoint(normal_execution);
+
 			m_ir_builder->CreateBr(GetBasicBlockFromAddress(m_state.current_instruction_address + 4));
 		}
 		else {
@@ -5215,36 +5446,25 @@ void Compiler::CreateBranch(llvm::Value * cmp_i1, llvm::Value * target_i32, bool
 		SetPc(target_i32);
 		if (target_is_lr && !lk) {
 			// Return from this function
-			m_ir_builder->CreateRet(m_ir_builder->getInt32(0));
+			m_ir_builder->CreateRet(m_ir_builder->getInt32(ExecutionStatus::ExecutionStatusReturn));
 		}
 		else if (lk) {
 			BasicBlock *next_block = GetBasicBlockFromAddress(m_state.current_instruction_address + 4);
-			BasicBlock *unknown_function_block = GetBasicBlockFromAddress(m_state.current_instruction_address, "unknown_function");
 
-			auto switch_instr = m_ir_builder->CreateSwitch(target_i32, unknown_function_block);
-			m_ir_builder->SetInsertPoint(unknown_function_block);
-			m_ir_builder->CreateCall2(m_execute_unknown_function, m_state.args[CompileTaskState::Args::State], m_ir_builder->getInt64(0));
+			llvm::Value *execStatus = m_ir_builder->CreateCall2(m_execute_unknown_function, m_state.args[CompileTaskState::Args::State], m_ir_builder->getInt64(0));
+
+			llvm::BasicBlock *cputhreadexitblock = GetBasicBlockFromAddress(m_state.current_instruction_address, "early_exit");
+			llvm::Value *isCPUThreadExit = m_ir_builder->CreateICmpEQ(execStatus, m_ir_builder->getInt32(ExecutionStatus::ExecutionStatusPropagateException));
+			llvm::BasicBlock *normal_execution = GetBasicBlockFromAddress(m_state.current_instruction_address, "normal_execution");
+			m_ir_builder->CreateCondBr(isCPUThreadExit, cputhreadexitblock, normal_execution);
+			m_ir_builder->SetInsertPoint(cputhreadexitblock);
+			m_ir_builder->CreateRet(m_ir_builder->getInt32(ExecutionStatus::ExecutionStatusPropagateException));
+			m_ir_builder->SetInsertPoint(normal_execution);
+
 			m_ir_builder->CreateBr(next_block);
-
-			auto call_i = m_state.cfg->calls.find(m_state.current_instruction_address);
-			if (call_i != m_state.cfg->calls.end()) {
-				for (auto function_i = call_i->second.begin(); function_i != call_i->second.end(); function_i++) {
-					auto block = GetBasicBlockFromAddress(m_state.current_instruction_address, fmt::Format("0x%08X", *function_i));
-					m_ir_builder->SetInsertPoint(block);
-					IndirectCall(*function_i, m_ir_builder->getInt64(0), true);
-					m_ir_builder->CreateBr(next_block);
-					switch_instr->addCase(m_ir_builder->getInt32(*function_i), block);
-				}
-			}
 		}
 		else {
-			auto switch_instr = m_ir_builder->CreateSwitch(target_i32, GetBasicBlockFromAddress(0xFFFFFFFF));
-			auto branch_i = m_state.cfg->branches.find(m_state.current_instruction_address);
-			if (branch_i != m_state.cfg->branches.end()) {
-				for (auto next_instr_i = branch_i->second.begin(); next_instr_i != branch_i->second.end(); next_instr_i++) {
-					switch_instr->addCase(m_ir_builder->getInt32(*next_instr_i), GetBasicBlockFromAddress(*next_instr_i));
-				}
-			}
+			m_ir_builder->CreateRet(m_ir_builder->getInt32(ExecutionStatus::ExecutionStatusBlockEnded));
 		}
 	}
 
@@ -5267,7 +5487,7 @@ void Compiler::CreateBranch(llvm::Value * cmp_i1, llvm::Value * target_i32, bool
 
 Value * Compiler::ReadMemory(Value * addr_i64, u32 bits, u32 alignment, bool bswap, bool could_be_mmio) {
 	addr_i64 = m_ir_builder->CreateAnd(addr_i64, 0xFFFFFFFF);
-	auto eaddr_i64 = m_ir_builder->CreateAdd(addr_i64, m_ir_builder->getInt64((u64)vm::get_ptr<u8>(0)));
+	auto eaddr_i64 = m_ir_builder->CreateAdd(addr_i64, m_ir_builder->getInt64((u64)vm::base(0)));
 	auto eaddr_ix_ptr = m_ir_builder->CreateIntToPtr(eaddr_i64, m_ir_builder->getIntNTy(bits)->getPointerTo());
 	auto val_ix = (Value *)m_ir_builder->CreateLoad(eaddr_ix_ptr, alignment);
 	if (bits > 8 && bswap) {
@@ -5283,28 +5503,9 @@ void Compiler::WriteMemory(Value * addr_i64, Value * val_ix, u32 alignment, bool
 	}
 
 	addr_i64 = m_ir_builder->CreateAnd(addr_i64, 0xFFFFFFFF);
-	auto eaddr_i64 = m_ir_builder->CreateAdd(addr_i64, m_ir_builder->getInt64((u64)vm::get_ptr<u8>(0)));
+	auto eaddr_i64 = m_ir_builder->CreateAdd(addr_i64, m_ir_builder->getInt64((u64)vm::base(0)));
 	auto eaddr_ix_ptr = m_ir_builder->CreateIntToPtr(eaddr_i64, val_ix->getType()->getPointerTo());
 	m_ir_builder->CreateAlignedStore(val_ix, eaddr_ix_ptr, alignment);
-}
-
-llvm::Value * Compiler::IndirectCall(u32 address, Value * context_i64, bool is_function) {
-	const Executable *functionPtr = m_recompilation_engine.GetExecutable(address, is_function);
-	auto location_i64 = m_ir_builder->getInt64((uint64_t)functionPtr);
-	auto location_i64_ptr = m_ir_builder->CreateIntToPtr(location_i64, m_ir_builder->getInt64Ty()->getPointerTo());
-	auto executable_i64 = m_ir_builder->CreateLoad(location_i64_ptr);
-	auto executable_ptr = m_ir_builder->CreateIntToPtr(executable_i64, m_compiled_function_type->getPointerTo());
-	auto ret_i32 = m_ir_builder->CreateCall2(executable_ptr, m_state.args[CompileTaskState::Args::State], context_i64);
-
-	auto cmp_i1 = m_ir_builder->CreateICmpEQ(ret_i32, m_ir_builder->getInt32(0xFFFFFFFF));
-	auto then_bb = GetBasicBlockFromAddress(m_state.current_instruction_address, "then_all_fs");
-	auto merge_bb = GetBasicBlockFromAddress(m_state.current_instruction_address, "merge_all_fs");
-	m_ir_builder->CreateCondBr(cmp_i1, then_bb, merge_bb);
-
-	m_ir_builder->SetInsertPoint(then_bb);
-	m_ir_builder->CreateRet(m_ir_builder->getInt32(0));
-	m_ir_builder->SetInsertPoint(merge_bb);
-	return ret_i32;
 }
 
 void Compiler::CompilationError(const std::string & error) {

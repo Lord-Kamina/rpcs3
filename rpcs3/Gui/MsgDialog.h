@@ -2,9 +2,9 @@
 
 #include "Emu/SysCalls/Modules/cellMsgDialog.h"
 
-class MsgDialogFrame : public MsgDialogInstance
+class MsgDialogFrame : public MsgDialogBase
 {
-	std::unique_ptr<wxDialog> m_dialog;
+	wxDialog* m_dialog = nullptr;
 	wxGauge* m_gauge1;
 	wxGauge* m_gauge2;
 	wxStaticText* m_text1;
@@ -17,9 +17,9 @@ class MsgDialogFrame : public MsgDialogInstance
 	wxSizer* m_buttons;
 
 public:
-	virtual void Create(u32 type, std::string msg) override;
-	virtual void Destroy() override;
-	virtual void ProgressBarSetMsg(u32 progressBarIndex, std::string msg) override;
+	virtual ~MsgDialogFrame() override;
+	virtual void Create(const std::string& msg) override;
+	virtual void ProgressBarSetMsg(u32 progressBarIndex, const std::string& msg) override;
 	virtual void ProgressBarReset(u32 progressBarIndex) override;
 	virtual void ProgressBarInc(u32 progressBarIndex, u32 delta) override;
 };

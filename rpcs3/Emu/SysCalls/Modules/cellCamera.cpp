@@ -1,69 +1,145 @@
 #include "stdafx.h"
-#include "Ini.h"
 #include "Emu/Memory/Memory.h"
+#include "Emu/IdManager.h"
+#include "Emu/System.h"
+#include "Emu/state.h"
 #include "Emu/SysCalls/Modules.h"
 
 #include "cellCamera.h"
 
-extern Module cellCamera;
+extern Module<> cellCamera;
 
-std::unique_ptr<camera_t> g_camera;
+static const char* get_camera_attr_name(s32 value)
+{
+	switch (value)
+	{
+	case CELL_CAMERA_GAIN: return "GAIN";
+	case CELL_CAMERA_REDBLUEGAIN: return "REDBLUEGAIN";
+	case CELL_CAMERA_SATURATION: return "SATURATION";
+	case CELL_CAMERA_EXPOSURE: return "EXPOSURE";
+	case CELL_CAMERA_BRIGHTNESS: return "BRIGHTNESS";
+	case CELL_CAMERA_AEC: return "AEC";
+	case CELL_CAMERA_AGC: return "AGC";
+	case CELL_CAMERA_AWB: return "AWB";
+	case CELL_CAMERA_ABC: return "ABC";
+	case CELL_CAMERA_LED: return "LED";
+	case CELL_CAMERA_AUDIOGAIN: return "AUDIOGAIN";
+	case CELL_CAMERA_QS: return "QS";
+	case CELL_CAMERA_NONZEROCOEFFS: return "NONZEROCOEFFS";
+	case CELL_CAMERA_YUVFLAG: return "YUVFLAG";
+	case CELL_CAMERA_JPEGFLAG: return "JPEGFLAG";
+	case CELL_CAMERA_BACKLIGHTCOMP: return "BACKLIGHTCOMP";
+	case CELL_CAMERA_MIRRORFLAG: return "MIRRORFLAG";
+	case CELL_CAMERA_MEASUREDQS: return "MEASUREDQS";
+	case CELL_CAMERA_422FLAG: return "422FLAG";
+	case CELL_CAMERA_USBLOAD: return "USBLOAD";
+	case CELL_CAMERA_GAMMA: return "GAMMA";
+	case CELL_CAMERA_GREENGAIN: return "GREENGAIN";
+	case CELL_CAMERA_AGCLIMIT: return "AGCLIMIT";
+	case CELL_CAMERA_DENOISE: return "DENOISE";
+	case CELL_CAMERA_FRAMERATEADJUST: return "FRAMERATEADJUST";
+	case CELL_CAMERA_PIXELOUTLIERFILTER: return "PIXELOUTLIERFILTER";
+	case CELL_CAMERA_AGCLOW: return "AGCLOW";
+	case CELL_CAMERA_AGCHIGH: return "AGCHIGH";
+	case CELL_CAMERA_DEVICELOCATION: return "DEVICELOCATION";
+	case CELL_CAMERA_FORMATCAP: return "FORMATCAP";
+	case CELL_CAMERA_FORMATINDEX: return "FORMATINDEX";
+	case CELL_CAMERA_NUMFRAME: return "NUMFRAME";
+	case CELL_CAMERA_FRAMEINDEX: return "FRAMEINDEX";
+	case CELL_CAMERA_FRAMESIZE: return "FRAMESIZE";
+	case CELL_CAMERA_INTERVALTYPE: return "INTERVALTYPE";
+	case CELL_CAMERA_INTERVALINDEX: return "INTERVALINDEX";
+	case CELL_CAMERA_INTERVALVALUE: return "INTERVALVALUE";
+	case CELL_CAMERA_COLORMATCHING: return "COLORMATCHING";
+	case CELL_CAMERA_PLFREQ: return "PLFREQ";
+	case CELL_CAMERA_DEVICEID: return "DEVICEID";
+	case CELL_CAMERA_DEVICECAP: return "DEVICECAP";
+	case CELL_CAMERA_DEVICESPEED: return "DEVICESPEED";
+	case CELL_CAMERA_UVCREQCODE: return "UVCREQCODE";
+	case CELL_CAMERA_UVCREQDATA: return "UVCREQDATA";
+	case CELL_CAMERA_DEVICEID2: return "DEVICEID2";
+	case CELL_CAMERA_READMODE: return "READMODE";
+	case CELL_CAMERA_GAMEPID: return "GAMEPID";
+	case CELL_CAMERA_PBUFFER: return "PBUFFER";
+	case CELL_CAMERA_READFINISH: return "READFINISH";
+	}
+
+	return nullptr;
+}
+
+// Custom struct to keep track of cameras
+struct camera_t
+{
+	struct attr_t
+	{
+		u32 v1, v2;
+	};
+
+	attr_t attr[500]{};
+};
 
 s32 cellCameraInit()
 {
 	cellCamera.Warning("cellCameraInit()");
 
-	if (Ini.Camera.GetValue() == 0)
+	if (rpcs3::config.io.camera.value() == io_camera_state::null)
 	{
 		return CELL_CAMERA_ERROR_DEVICE_NOT_FOUND;
 	}
 
-	if (g_camera->init)
+	const auto camera = fxm::make<camera_t>();
+
+	if (!camera)
 	{
 		return CELL_CAMERA_ERROR_ALREADY_INIT;
 	}
 
-	if (Ini.CameraType.GetValue() == 1)
+	switch (rpcs3::config.io.camera_type.value())
 	{
-		g_camera->attr[CELL_CAMERA_SATURATION] = { 164 };
-		g_camera->attr[CELL_CAMERA_BRIGHTNESS] = { 96 };
-		g_camera->attr[CELL_CAMERA_AEC] = { 1 };
-		g_camera->attr[CELL_CAMERA_AGC] = { 1 };
-		g_camera->attr[CELL_CAMERA_AWB] = { 1 };
-		g_camera->attr[CELL_CAMERA_ABC] = { 0 };
-		g_camera->attr[CELL_CAMERA_LED] = { 1 };
-		g_camera->attr[CELL_CAMERA_QS] = { 0 };
-		g_camera->attr[CELL_CAMERA_NONZEROCOEFFS] = { 32, 32 };
-		g_camera->attr[CELL_CAMERA_YUVFLAG] = { 0 };
-		g_camera->attr[CELL_CAMERA_BACKLIGHTCOMP] = { 0 };
-		g_camera->attr[CELL_CAMERA_MIRRORFLAG] = { 1 };
-		g_camera->attr[CELL_CAMERA_422FLAG] = { 1 };
-		g_camera->attr[CELL_CAMERA_USBLOAD] = { 4 };
-	}
-	else if (Ini.CameraType.GetValue() == 2)
+	case io_camera_type::eye_toy:
 	{
-		g_camera->attr[CELL_CAMERA_SATURATION] = { 64 };
-		g_camera->attr[CELL_CAMERA_BRIGHTNESS] = { 8 };
-		g_camera->attr[CELL_CAMERA_AEC] = { 1 };
-		g_camera->attr[CELL_CAMERA_AGC] = { 1 };
-		g_camera->attr[CELL_CAMERA_AWB] = { 1 };
-		g_camera->attr[CELL_CAMERA_LED] = { 1 };
-		g_camera->attr[CELL_CAMERA_BACKLIGHTCOMP] = { 0 };
-		g_camera->attr[CELL_CAMERA_MIRRORFLAG] = { 1 };
-		g_camera->attr[CELL_CAMERA_GAMMA] = { 1 };
-		g_camera->attr[CELL_CAMERA_AGCLIMIT] = { 4 };
-		g_camera->attr[CELL_CAMERA_DENOISE] = { 0 };
-		g_camera->attr[CELL_CAMERA_FRAMERATEADJUST] = { 0 };
-		g_camera->attr[CELL_CAMERA_PIXELOUTLIERFILTER] = { 1 };
-		g_camera->attr[CELL_CAMERA_AGCLOW] = { 48 };
-		g_camera->attr[CELL_CAMERA_AGCHIGH] = { 64 };
+		camera->attr[CELL_CAMERA_SATURATION] = { 164 };
+		camera->attr[CELL_CAMERA_BRIGHTNESS] = { 96 };
+		camera->attr[CELL_CAMERA_AEC] = { 1 };
+		camera->attr[CELL_CAMERA_AGC] = { 1 };
+		camera->attr[CELL_CAMERA_AWB] = { 1 };
+		camera->attr[CELL_CAMERA_ABC] = { 0 };
+		camera->attr[CELL_CAMERA_LED] = { 1 };
+		camera->attr[CELL_CAMERA_QS] = { 0 };
+		camera->attr[CELL_CAMERA_NONZEROCOEFFS] = { 32, 32 };
+		camera->attr[CELL_CAMERA_YUVFLAG] = { 0 };
+		camera->attr[CELL_CAMERA_BACKLIGHTCOMP] = { 0 };
+		camera->attr[CELL_CAMERA_MIRRORFLAG] = { 1 };
+		camera->attr[CELL_CAMERA_422FLAG] = { 1 };
+		camera->attr[CELL_CAMERA_USBLOAD] = { 4 };
 	}
-	// TODO: Some other default attributes? Need to check the actual behaviour on a real PS3.
+	break;
 
-	if (g_camera->init.exchange(true))
+	case io_camera_type::play_station_eye:
 	{
-		throw EXCEPTION("Unexpected");
+		camera->attr[CELL_CAMERA_SATURATION] = { 64 };
+		camera->attr[CELL_CAMERA_BRIGHTNESS] = { 8 };
+		camera->attr[CELL_CAMERA_AEC] = { 1 };
+		camera->attr[CELL_CAMERA_AGC] = { 1 };
+		camera->attr[CELL_CAMERA_AWB] = { 1 };
+		camera->attr[CELL_CAMERA_LED] = { 1 };
+		camera->attr[CELL_CAMERA_BACKLIGHTCOMP] = { 0 };
+		camera->attr[CELL_CAMERA_MIRRORFLAG] = { 1 };
+		camera->attr[CELL_CAMERA_GAMMA] = { 1 };
+		camera->attr[CELL_CAMERA_AGCLIMIT] = { 4 };
+		camera->attr[CELL_CAMERA_DENOISE] = { 0 };
+		camera->attr[CELL_CAMERA_FRAMERATEADJUST] = { 0 };
+		camera->attr[CELL_CAMERA_PIXELOUTLIERFILTER] = { 1 };
+		camera->attr[CELL_CAMERA_AGCLOW] = { 48 };
+		camera->attr[CELL_CAMERA_AGCHIGH] = { 64 };
 	}
+
+	break;
+
+	default: break;
+	}
+
+	// TODO: Some other default attributes? Need to check the actual behaviour on a real PS3.
 
 	return CELL_OK;
 }
@@ -72,14 +148,9 @@ s32 cellCameraEnd()
 {
 	cellCamera.Warning("cellCameraEnd()");
 
-	if (!g_camera->init)
+	if (!fxm::remove<camera_t>())
 	{
 		return CELL_CAMERA_ERROR_NOT_INIT;
-	}
-
-	if (!g_camera->init.exchange(false))
-	{
-		throw EXCEPTION("Unexpected");
 	}
 
 	return CELL_OK;
@@ -113,16 +184,18 @@ s32 cellCameraGetType(s32 dev_num, vm::ptr<s32> type)
 {
 	cellCamera.Warning("cellCameraGetType(dev_num=%d, type=*0x%x)", dev_num, type);
 
-	if (!g_camera->init.load())
+	const auto camera = fxm::get<camera_t>();
+
+	if (!camera)
 	{
 		return CELL_CAMERA_ERROR_NOT_INIT;
 	}
 
-	switch (Ini.CameraType.GetValue())
+	switch (rpcs3::config.io.camera_type.value())
 	{
-	case 1: *type = CELL_CAMERA_EYETOY; break;
-	case 2: *type = CELL_CAMERA_EYETOY2; break;
-	case 3: *type = CELL_CAMERA_USBVIDEOCLASS; break;
+	case io_camera_type::eye_toy: *type = CELL_CAMERA_EYETOY; break;
+	case io_camera_type::play_station_eye: *type = CELL_CAMERA_EYETOY2; break;
+	case io_camera_type::usb_video_class_1_1: *type = CELL_CAMERA_USBVIDEOCLASS; break;
 	default: *type = CELL_CAMERA_TYPE_UNKNOWN; break;
 	}
 
@@ -139,7 +212,7 @@ s32 cellCameraIsAttached(s32 dev_num)
 {
 	cellCamera.Warning("cellCameraIsAttached(dev_num=%d)", dev_num);
 
-	if (Ini.Camera.GetValue() == 1)
+	if (rpcs3::config.io.camera.value() == io_camera_state::connected)
 	{
 		return 1;
 	}
@@ -163,9 +236,11 @@ s32 cellCameraGetAttribute(s32 dev_num, s32 attrib, vm::ptr<u32> arg1, vm::ptr<u
 {
 	cellCamera.Warning("cellCameraGetAttribute(dev_num=%d, attrib=%d, arg1=*0x%x, arg2=*0x%x)", dev_num, attrib, arg1, arg2);
 
-	const auto attr_name = camera_t::get_attr_name(attrib);
+	const auto attr_name = get_camera_attr_name(attrib);
 
-	if (!g_camera->init.load())
+	const auto camera = fxm::get<camera_t>();
+
+	if (!camera)
 	{
 		return CELL_CAMERA_ERROR_NOT_INIT;
 	}
@@ -175,8 +250,8 @@ s32 cellCameraGetAttribute(s32 dev_num, s32 attrib, vm::ptr<u32> arg1, vm::ptr<u
 		return CELL_CAMERA_ERROR_PARAM;
 	}
 
-	*arg1 = g_camera->attr[attrib].v1;
-	*arg2 = g_camera->attr[attrib].v2;
+	*arg1 = camera->attr[attrib].v1;
+	*arg2 = camera->attr[attrib].v2;
 
 	return CELL_OK;
 }
@@ -185,9 +260,11 @@ s32 cellCameraSetAttribute(s32 dev_num, s32 attrib, u32 arg1, u32 arg2)
 {
 	cellCamera.Warning("cellCameraSetAttribute(dev_num=%d, attrib=%d, arg1=%d, arg2=%d)", dev_num, attrib, arg1, arg2);
 
-	const auto attr_name = camera_t::get_attr_name(attrib);
+	const auto attr_name = get_camera_attr_name(attrib);
 
-	if (!g_camera->init.load())
+	const auto camera = fxm::get<camera_t>();
+
+	if (!camera)
 	{
 		return CELL_CAMERA_ERROR_NOT_INIT;
 	}
@@ -197,7 +274,7 @@ s32 cellCameraSetAttribute(s32 dev_num, s32 attrib, u32 arg1, u32 arg2)
 		return CELL_CAMERA_ERROR_PARAM;
 	}
 
-	g_camera->attr[attrib] = { arg1, arg2 };
+	camera->attr[attrib] = { arg1, arg2 };
 
 	return CELL_OK;
 }
@@ -304,13 +381,11 @@ s32 cellCameraRemoveNotifyEventQueue2(u64 key)
 	return CELL_OK;
 }
 
-Module cellCamera("cellCamera", []()
+Module<> cellCamera("cellCamera", []()
 {
-	g_camera = std::make_unique<camera_t>();
-
 	REG_FUNC(cellCamera, cellCameraInit);
 	REG_FUNC(cellCamera, cellCameraEnd);
-	REG_FUNC(cellCamera, cellCameraOpen);
+	REG_FUNC(cellCamera, cellCameraOpen); // was "renamed", but exists
 	REG_FUNC(cellCamera, cellCameraOpenEx);
 	REG_FUNC(cellCamera, cellCameraClose);
 
@@ -323,7 +398,7 @@ Module cellCamera("cellCamera", []()
 	REG_FUNC(cellCamera, cellCameraGetAttribute);
 	REG_FUNC(cellCamera, cellCameraSetAttribute);
 	REG_FUNC(cellCamera, cellCameraGetBufferSize);
-	REG_FUNC(cellCamera, cellCameraGetBufferInfo);
+	REG_FUNC(cellCamera, cellCameraGetBufferInfo); // was "renamed", but exists
 	REG_FUNC(cellCamera, cellCameraGetBufferInfoEx);
 
 	REG_FUNC(cellCamera, cellCameraPrepExtensionUnit);

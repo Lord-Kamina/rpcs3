@@ -1,6 +1,6 @@
 #pragma once
 
-#include "sleep_queue.h"
+#include "Utilities/SleepQueue.h"
 
 namespace vm { using namespace ps3; }
 
@@ -37,8 +37,6 @@ struct lv2_sema_t
 	{
 	}
 };
-
-REG_ID_TYPE(lv2_sema_t, 0x96); // SYS_SEMAPHORE_OBJECT
 
 // Aux
 class PPUThread;

@@ -1,8 +1,7 @@
 #include "stdafx.h"
-#include "rpcs3/Ini.h"
-#include "Utilities/Log.h"
 #include "Emu/Memory/Memory.h"
 #include "Emu/System.h"
+#include "Emu/state.h"
 
 #include "Emu/IdManager.h"
 #include "Emu/Cell/PPUThread.h"
@@ -14,19 +13,22 @@
 
 #include "Emu/Cell/SPUDisAsm.h"
 #include "Emu/Cell/SPUThread.h"
-#include "Emu/Cell/SPUDecoder.h"
 #include "Emu/Cell/SPUInterpreter.h"
-#include "Emu/Cell/SPUInterpreter2.h"
 #include "Emu/Cell/SPURecompiler.h"
 
 #include <cfenv>
 
 extern u64 get_timebased_time();
 
+// defined here since SPUDisAsm.cpp doesn't exist
+const spu_opcode_table_t<void(SPUDisAsm::*)(spu_opcode_t)> SPUDisAsm::opcodes{ DEFINE_SPU_OPCODES(&SPUDisAsm::), &SPUDisAsm::UNK };
+
+thread_local bool spu_channel_t::notification_required;
+
 void spu_int_ctrl_t::set(u64 ints)
 {
 	// leave only enabled interrupts
-	ints &= mask.load();
+	ints &= mask;
 
 	// notify if at least 1 bit was set
 	if (ints && ~stat._or(ints) & ints && tag)
@@ -47,74 +49,27 @@ void spu_int_ctrl_t::clear(u64 ints)
 	stat &= ~ints;
 }
 
-const g_spu_imm_table_t g_spu_imm;
+const spu_imm_table_t g_spu_imm;
 
-class spu_inter_func_list_t
-{
-	std::array<spu_inter_func_t, 2048> funcs = {};
-
-	std::mutex m_mutex;
-
-public:
-	void initialize()
-	{
-		std::lock_guard<std::mutex> lock(m_mutex);
-
-		if (funcs[0]) return; // check if already initialized
-
-		auto inter = new SPUInterpreter2;
-		SPUDecoder dec(*inter);
-
-		for (u32 i = 0; i < funcs.size(); i++)
-		{
-			inter->func = spu_interpreter::DEFAULT;
-			
-			dec.Decode(i << 21);
-
-			funcs[i] = inter->func;
-		}
-	}
-
-	force_inline spu_inter_func_t operator [](u32 opcode) const
-	{
-		return funcs[opcode >> 21];
-	}
-}
-g_spu_inter_func_list;
-
-SPUThread::SPUThread(CPUThreadType type, const std::string& name, std::function<std::string()> thread_name, u32 index, u32 offset)
-	: CPUThread(type, name, std::move(thread_name))
+SPUThread::SPUThread(CPUThreadType type, const std::string& name, u32 index, u32 offset)
+	: CPUThread(type, name)
 	, index(index)
 	, offset(offset)
 {
 }
 
 SPUThread::SPUThread(const std::string& name, u32 index)
-	: CPUThread(CPU_THREAD_SPU, name, WRAP_EXPR(fmt::format("SPU[0x%x] Thread (%s)[0x%08x]", m_id, m_name.c_str(), PC)))
+	: CPUThread(CPU_THREAD_SPU, name)
 	, index(index)
 	, offset(vm::alloc(0x40000, vm::main))
 {
-	if (!offset)
-	{
-		throw EXCEPTION("Failed to allocate SPU local storage");
-	}
+	CHECK_ASSERTION(offset);
 }
 
 SPUThread::~SPUThread()
 {
-	if (m_type == CPU_THREAD_SPU)
-	{
-		join();
-
-		if (!vm::dealloc(offset, vm::main))
-		{
-			throw EXCEPTION("Failed to deallocate SPU local storage");
-		}
-	}
-	else if (joinable())
-	{
-		throw EXCEPTION("Thread not joined");
-	}
+	// Deallocate Local Storage
+	vm::dealloc_verbose_nothrow(offset);
 }
 
 bool SPUThread::is_paused() const
@@ -135,14 +90,50 @@ bool SPUThread::is_paused() const
 	return false;
 }
 
+std::string SPUThread::get_name() const
+{
+	return fmt::format("%s[0x%x] Thread (%s)[0x%05x]", CPUThread::GetTypeString(), m_id, CPUThread::get_name(), pc);
+}
+
 void SPUThread::dump_info() const
 {
 	CPUThread::dump_info();
 }
 
-void SPUThread::task()
+void SPUThread::cpu_task()
 {
 	std::fesetround(FE_TOWARDZERO);
+
+	if (!custom_task && !m_dec)
+	{
+		// Select opcode table (TODO)
+		const auto& table = rpcs3::state.config.core.spu_decoder.value() == spu_decoder_type::interpreter_precise ? spu_interpreter::precise::g_spu_opcode_table : spu_interpreter::fast::g_spu_opcode_table;
+
+		// LS base address
+		const auto base = vm::_ptr<const u32>(offset);
+
+		while (true)
+		{
+			if (!m_state)
+			{
+				// read opcode
+				const u32 opcode = base[pc / 4];
+
+				// call interpreter function
+				table[opcode](*this, { opcode });
+
+				// next instruction
+				pc += 4;
+
+				continue;
+			}
+
+			if (check_status())
+			{
+				return;
+			}
+		}
+	}
 
 	if (custom_task)
 	{
@@ -150,78 +141,53 @@ void SPUThread::task()
 
 		return custom_task(*this);
 	}
-	
-	if (m_dec)
+
+	while (!m_state || !check_status())
 	{
-		while (true)
-		{
-			if (m_state.load() && check_status()) break;
-
-			// decode instruction using specified decoder
-			m_dec->DecodeMemory(PC + offset);
-
-			// next instruction
-			PC += 4;
-		}
-	}
-	else
-	{
-		while (true)
-		{
-			if (m_state.load() && check_status()) break;
-
-			// read opcode
-			const spu_opcode_t opcode = { vm::read32(PC + offset) };
-
-			// get interpreter function
-			const auto func = g_spu_inter_func_list[opcode.opcode];
-
-			// call interpreter function
-			func(*this, opcode);
-
-			// next instruction
-			PC += 4;
-		}
+		// decode instruction using specified decoder
+		pc += m_dec->DecodeMemory(pc + offset);
 	}
 }
 
 void SPUThread::init_regs()
 {
-	memset(GPR, 0, sizeof(GPR));
-	FPSCR.Reset();
+	gpr = {};
+	fpscr.Reset();
 
 	ch_mfc_args = {};
 	mfc_queue.clear();
 
 	ch_tag_mask = 0;
-	ch_tag_stat = {};
-	ch_stall_stat = {};
-	ch_atomic_stat = {};
+	ch_tag_stat.data.store({});
+	ch_stall_stat.data.store({});
+	ch_atomic_stat.data.store({});
 
 	ch_in_mbox.clear();
 
-	ch_out_mbox = {};
-	ch_out_intr_mbox = {};
+	ch_out_mbox.data.store({});
+	ch_out_intr_mbox.data.store({});
 
 	snr_config = 0;
 
-	ch_snr1 = {};
-	ch_snr2 = {};
+	ch_snr1.data.store({});
+	ch_snr2.data.store({});
 
-	ch_event_mask = {};
-	ch_event_stat = {};
+	ch_event_mask = 0;
+	ch_event_stat = 0;
 	last_raddr = 0;
 
 	ch_dec_start_timestamp = get_timebased_time(); // ???
 	ch_dec_value = 0;
 
-	run_ctrl = {};
-	status = {};
-	npc = {};
+	run_ctrl = 0;
+	status = 0;
+	npc = 0;
 
-	int_ctrl = {};
+	int_ctrl[0].clear();
+	int_ctrl[1].clear();
+	int_ctrl[2].clear();
 
-	GPR[1]._u32[3] = 0x3FFF0; // initial stack frame pointer
+	gpr[1]._u32[3] = 0x3FFF0; // initial stack frame pointer
 }
 
 void SPUThread::init_stack()
@@ -236,31 +202,25 @@ void SPUThread::close_stack()
 
 void SPUThread::do_run()
 {
-	m_dec = nullptr;
+	m_dec.reset();
 
-	switch (auto mode = Ini.SPUDecoderMode.GetValue())
+	switch (auto mode = rpcs3::state.config.core.spu_decoder.value())
 	{
-	case 0: // original interpreter
+	case spu_decoder_type::interpreter_precise: // Interpreter 1 (Precise)
+	case spu_decoder_type::interpreter_fast: // Interpreter 2 (Fast)
 	{
-		m_dec.reset(new SPUDecoder(*new SPUInterpreter(*this)));
-		break;
-	}
-		
-	case 1: // alternative interpreter
-	{
-		g_spu_inter_func_list.initialize(); // initialize helper table
 		break;
 	}
 
-	case 2:
+	case spu_decoder_type::recompiler_asmjit:
 	{
-		m_dec.reset(new SPURecompilerCore(*this));
+		m_dec.reset(new SPURecompilerDecoder(*this));
 		break;
 	}
 
 	default:
 	{
-		LOG_ERROR(SPU, "Invalid SPU decoder mode: %d", mode);
+		LOG_ERROR(SPU, "Invalid SPU decoder mode: %d", (u8)mode);
 		Emu.Pause();
 	}
 	}
@@ -273,20 +233,21 @@ void SPUThread::fast_call(u32 ls_addr)
 		throw EXCEPTION("Called from the wrong thread");
 	}
 
-	write32(0x0, 2);
+	// LS:0x0: this is originally the entry point of the interrupt handler, but interrupts are not implemented
+	_ref<u32>(0) = 0x00000002; // STOP 2
 
-	auto old_PC = PC;
-	auto old_LR = GPR[0]._u32[3];
-	auto old_stack = GPR[1]._u32[3]; // only saved and restored (may be wrong)
+	auto old_pc = pc;
+	auto old_lr = gpr[0]._u32[3];
+	auto old_stack = gpr[1]._u32[3]; // only saved and restored (may be wrong)
 	auto old_task = std::move(custom_task);
 
-	PC = ls_addr;
-	GPR[0]._u32[3] = 0x0;
+	pc = ls_addr;
+	gpr[0]._u32[3] = 0x0;
 	custom_task = nullptr;
 
 	try
 	{
-		task();
+		cpu_task();
 	}
 	catch (CPUThreadReturn)
 	{
@@ -294,9 +255,9 @@ void SPUThread::fast_call(u32 ls_addr)
 
 	m_state &= ~CPU_STATE_RETURN;
 
-	PC = old_PC;
-	GPR[0]._u32[3] = old_LR;
-	GPR[1]._u32[3] = old_stack;
+	pc = old_pc;
+	gpr[0]._u32[3] = old_lr;
+	gpr[1]._u32[3] = old_stack;
 	custom_task = std::move(old_task);
 }
 
@@ -326,7 +287,7 @@ void SPUThread::do_dma_transfer(u32 cmd, spu_mfc_arg_t args)
 			}
 			else if ((cmd & MFC_PUT_CMD) && args.size == 4 && (offset == SYS_SPU_THREAD_SNR1 || offset == SYS_SPU_THREAD_SNR2))
 			{
-				spu.push_snr(SYS_SPU_THREAD_SNR2 == offset, read32(args.lsa));
+				spu.push_snr(SYS_SPU_THREAD_SNR2 == offset, _ref<u32>(args.lsa));
 				return;
 			}
 			else
@@ -345,13 +306,13 @@ void SPUThread::do_dma_transfer(u32 cmd, spu_mfc_arg_t args)
 	case MFC_PUT_CMD:
 	case MFC_PUTR_CMD:
 	{
-		memcpy(vm::get_ptr(eal), vm::get_ptr(offset + args.lsa), args.size);
+		std::memcpy(vm::base(eal), vm::base(offset + args.lsa), args.size);
 		return;
 	}
 
 	case MFC_GET_CMD:
 	{
-		memcpy(vm::get_ptr(offset + args.lsa), vm::get_ptr(eal), args.size);
+		std::memcpy(vm::base(offset + args.lsa), vm::base(eal), args.size);
 		return;
 	}
 	}
@@ -415,7 +376,7 @@ void SPUThread::do_dma_list_cmd(u32 cmd, spu_mfc_arg_t args)
 
 void SPUThread::process_mfc_cmd(u32 cmd)
 {
-	if (Ini.HLELogging.GetValue())
+	if (rpcs3::config.misc.log.hle_logging.value())
 	{
 		LOG_NOTICE(SPU, "DMA %s: cmd=0x%x, lsa=0x%x, ea=0x%llx, tag=0x%x, size=0x%x", get_mfc_cmd_name(cmd), cmd, ch_mfc_args.lsa, ch_mfc_args.ea, ch_mfc_args.tag, ch_mfc_args.size);
 	}
@@ -457,7 +418,7 @@ void SPUThread::process_mfc_cmd(u32 cmd)
 
 		const u32 raddr = VM_CAST(ch_mfc_args.ea);
 
-		vm::reservation_acquire(vm::get_ptr(offset + ch_mfc_args.lsa), raddr, 128);
+		vm::reservation_acquire(vm::base(offset + ch_mfc_args.lsa), raddr, 128);
 
 		if (last_raddr)
 		{
@@ -476,7 +437,7 @@ void SPUThread::process_mfc_cmd(u32 cmd)
 			break;
 		}
 
-		if (vm::reservation_update(VM_CAST(ch_mfc_args.ea), vm::get_ptr(offset + ch_mfc_args.lsa), 128))
+		if (vm::reservation_update(VM_CAST(ch_mfc_args.ea), vm::base(offset + ch_mfc_args.lsa), 128))
 		{
 			if (last_raddr == 0)
 			{
@@ -510,7 +471,7 @@ void SPUThread::process_mfc_cmd(u32 cmd)
 
 		vm::reservation_op(VM_CAST(ch_mfc_args.ea), 128, [this]()
 		{
-			std::memcpy(vm::priv_ptr(VM_CAST(ch_mfc_args.ea)), vm::get_ptr(offset + ch_mfc_args.lsa), 128);
+			std::memcpy(vm::base_priv(VM_CAST(ch_mfc_args.ea)), vm::base(offset + ch_mfc_args.lsa), 128);
 		});
 
 		if (last_raddr != 0 && vm::g_tls_did_break_reservation)
@@ -527,9 +488,17 @@ void SPUThread::process_mfc_cmd(u32 cmd)
 
 		return;
 	}
+
+	case MFC_BARRIER_CMD:
+	case MFC_EIEIO_CMD:
+	case MFC_SYNC_CMD:
+		LOG_WARNING(SPU, "process_mfc_cmd: Sync channel '%s' ignored. (cmd=0x%x, lsa=0x%x, ea=0x%llx, tag=0x%x, size=0x%x)",
+			get_mfc_cmd_name(cmd), cmd, ch_mfc_args.lsa, ch_mfc_args.ea, ch_mfc_args.tag, ch_mfc_args.size);
+		return;
 	}
 
-	throw EXCEPTION("Unknown command %s (cmd=0x%x, lsa=0x%x, ea=0x%llx, tag=0x%x, size=0x%x)", get_mfc_cmd_name(cmd), cmd, ch_mfc_args.lsa, ch_mfc_args.ea, ch_mfc_args.tag, ch_mfc_args.size);
+	throw EXCEPTION("Unknown command %s (cmd=0x%x, lsa=0x%x, ea=0x%llx, tag=0x%x, size=0x%x)",
+		get_mfc_cmd_name(cmd), cmd, ch_mfc_args.lsa, ch_mfc_args.ea, ch_mfc_args.tag, ch_mfc_args.size);
 }
 
 u32 SPUThread::get_events(bool waiting)
@@ -538,7 +507,7 @@ u32 SPUThread::get_events(bool waiting)
 	if (last_raddr != 0 && !vm::reservation_test(get_thread_ctrl()))
 	{
 		ch_event_stat |= SPU_EVENT_LR;
-		
+
 		last_raddr = 0;
 	}
 
@@ -548,7 +517,7 @@ u32 SPUThread::get_events(bool waiting)
 		// polling with atomically set/removed SPU_EVENT_WAITING flag
 		return ch_event_stat.atomic_op([this](u32& stat) -> u32
 		{
-			if (u32 res = stat & ch_event_mask.load())
+			if (u32 res = stat & ch_event_mask)
 			{
 				stat &= ~SPU_EVENT_WAITING;
 				return res;
@@ -562,7 +531,7 @@ u32 SPUThread::get_events(bool waiting)
 	}
 
 	// simple polling
-	return ch_event_stat.load() & ch_event_mask.load();
+	return ch_event_stat & ch_event_mask;
 }
 
 void SPUThread::set_events(u32 mask)
@@ -580,7 +549,7 @@ void SPUThread::set_events(u32 mask)
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 
-		if (ch_event_stat.load() & SPU_EVENT_WAITING)
+		if (ch_event_stat & SPU_EVENT_WAITING)
 		{
 			cv.notify_one();
 		}
@@ -592,7 +561,7 @@ void SPUThread::set_interrupt_status(bool enable)
 	if (enable)
 	{
 		// detect enabling interrupts with events masked
-		if (u32 mask = ch_event_mask.load())
+		if (u32 mask = ch_event_mask)
 		{
 			throw EXCEPTION("SPU Interrupts not implemented (mask=0x%x)", mask);
 		}
@@ -607,7 +576,7 @@ void SPUThread::set_interrupt_status(bool enable)
 
 u32 SPUThread::get_ch_count(u32 ch)
 {
-	if (Ini.HLELogging.GetValue())
+	if (rpcs3::config.misc.log.hle_logging.value())
 	{
 		LOG_NOTICE(SPU, "get_ch_count(ch=%d [%s])", ch, ch < 128 ? spu_ch_name[ch] : "???");
 	}
@@ -634,7 +603,7 @@ u32 SPUThread::get_ch_count(u32 ch)
 
 u32 SPUThread::get_ch_value(u32 ch)
 {
-	if (Ini.HLELogging.GetValue())
+	if (rpcs3::config.misc.log.hle_logging.value())
 	{
 		LOG_NOTICE(SPU, "get_ch_value(ch=%d [%s])", ch, ch < 128 ? spu_ch_name[ch] : "???");
 	}
@@ -747,7 +716,7 @@ u32 SPUThread::get_ch_value(u32 ch)
 
 	case SPU_RdEventMask:
 	{
-		return ch_event_mask.load();
+		return ch_event_mask;
 	}
 
 	case SPU_RdEventStat:
@@ -760,7 +729,7 @@ u32 SPUThread::get_ch_value(u32 ch)
 			return res;
 		}
 
-		if (ch_event_mask.load() & SPU_EVENT_LR)
+		if (ch_event_mask & SPU_EVENT_LR)
 		{
 			// register waiter if polling reservation status is required
 			vm::wait_op(*this, last_raddr, 128, WRAP_EXPR(get_events(true) || is_stopped()));
@@ -789,7 +758,7 @@ u32 SPUThread::get_ch_value(u32 ch)
 	{
 		// HACK: "Not isolated" status
 		// Return SPU Interrupt status in LSB
-		return (ch_event_stat.load() & SPU_EVENT_INTR_ENABLED) != 0;
+		return (ch_event_stat & SPU_EVENT_INTR_ENABLED) != 0;
 	}
 	}
 
@@ -798,7 +767,7 @@ u32 SPUThread::get_ch_value(u32 ch)
 
 void SPUThread::set_ch_value(u32 ch, u32 value)
 {
-	if (Ini.HLELogging.GetValue())
+	if (rpcs3::config.misc.log.hle_logging.value())
 	{
 		LOG_NOTICE(SPU, "set_ch_value(ch=%d [%s], value=0x%x)", ch, ch < 128 ? spu_ch_name[ch] : "???", value);
 	}
@@ -857,7 +826,7 @@ void SPUThread::set_ch_value(u32 ch, u32 value)
 
 				ch_out_mbox.set_value(data, 0);
 
-				if (Ini.HLELogging.GetValue())
+				if (rpcs3::config.misc.log.hle_logging.value())
 				{
 					LOG_NOTICE(SPU, "sys_spu_thread_send_event(spup=%d, data0=0x%x, data1=0x%x)", spup, value & 0x00ffffff, data);
 				}
@@ -896,7 +865,7 @@ void SPUThread::set_ch_value(u32 ch, u32 value)
 
 				ch_out_mbox.set_value(data, 0);
 
-				if (Ini.HLELogging.GetValue())
+				if (rpcs3::config.misc.log.hle_logging.value())
 				{
 					LOG_WARNING(SPU, "sys_spu_thread_throw_event(spup=%d, data0=0x%x, data1=0x%x)", spup, value & 0x00ffffff, data);
 				}
@@ -946,12 +915,12 @@ void SPUThread::set_ch_value(u32 ch, u32 value)
 					throw EXCEPTION("sys_event_flag_set_bit(id=%d, value=0x%x (flag=%d)): Invalid flag", data, value, flag);
 				}
 
-				if (Ini.HLELogging.GetValue())
+				if (rpcs3::config.misc.log.hle_logging.value())
 				{
 					LOG_WARNING(SPU, "sys_event_flag_set_bit(id=%d, value=0x%x (flag=%d))", data, value, flag);
 				}
 
-				const auto eflag = Emu.GetIdManager().get<lv2_event_flag_t>(data);
+				const auto eflag = idm::get<lv2_event_flag_t>(data);
 
 				if (!eflag)
 				{
@@ -990,12 +959,12 @@ void SPUThread::set_ch_value(u32 ch, u32 value)
 					throw EXCEPTION("sys_event_flag_set_bit_impatient(id=%d, value=0x%x (flag=%d)): Invalid flag", data, value, flag);
 				}
 
-				if (Ini.HLELogging.GetValue())
+				if (rpcs3::config.misc.log.hle_logging.value())
 				{
 					LOG_WARNING(SPU, "sys_event_flag_set_bit_impatient(id=%d, value=0x%x (flag=%d))", data, value, flag);
 				}
 
-				const auto eflag = Emu.GetIdManager().get<lv2_event_flag_t>(data);
+				const auto eflag = idm::get<lv2_event_flag_t>(data);
 
 				if (!eflag)
 				{
@@ -1157,7 +1126,7 @@ void SPUThread::set_ch_value(u32 ch, u32 value)
 	case SPU_WrEventMask:
 	{
 		// detect masking events with enabled interrupt status
-		if (value && ch_event_stat.load() & SPU_EVENT_INTR_ENABLED)
+		if (value && ch_event_stat & SPU_EVENT_INTR_ENABLED)
 		{
 			throw EXCEPTION("SPU Interrupts not implemented (mask=0x%x)", value);
 		}
@@ -1168,7 +1137,7 @@ void SPUThread::set_ch_value(u32 ch, u32 value)
 			break;
 		}
 
-		ch_event_mask.store(value);
+		ch_event_mask = value;
 		return;
 	}
 
@@ -1189,7 +1158,7 @@ void SPUThread::set_ch_value(u32 ch, u32 value)
 
 void SPUThread::stop_and_signal(u32 code)
 {
-	if (Ini.HLELogging.GetValue())
+	if (rpcs3::config.misc.log.hle_logging.value())
 	{
 		LOG_NOTICE(SPU, "stop_and_signal(code=0x%x)", code);
 	}
@@ -1224,14 +1193,18 @@ void SPUThread::stop_and_signal(u32 code)
 
 	case 0x003:
 	{
-		auto iter = m_addr_to_hle_function_map.find(PC);
-		assert(iter != m_addr_to_hle_function_map.end());
+		const auto found = m_addr_to_hle_function_map.find(pc);
 
-		auto return_to_caller = iter->second(*this);
-		if (return_to_caller)
+		if (found == m_addr_to_hle_function_map.end())
 		{
-			PC = (GPR[0]._u32[3] & 0x3fffc) - 4;
+			throw EXCEPTION("HLE function not registered (PC=0x%05x)", pc);
 		}
+
+		if (const auto return_to_caller = found->second(*this))
+		{
+			pc = (gpr[0]._u32[3] & 0x3fffc) - 4;
+		}
+
 		return;
 	}
 
@@ -1256,7 +1229,7 @@ void SPUThread::stop_and_signal(u32 code)
 
 		ch_out_mbox.set_value(spuq, 0);
 
-		if (Ini.HLELogging.GetValue())
+		if (rpcs3::config.misc.log.hle_logging.value())
 		{
 			LOG_NOTICE(SPU, "sys_spu_thread_receive_event(spuq=0x%x)", spuq);
 		}
@@ -1382,7 +1355,7 @@ void SPUThread::stop_and_signal(u32 code)
 
 		ch_out_mbox.set_value(value, 0);
 
-		if (Ini.HLELogging.GetValue())
+		if (rpcs3::config.misc.log.hle_logging.value())
 		{
 			LOG_NOTICE(SPU, "sys_spu_thread_group_exit(status=0x%x)", value);
 		}
@@ -1394,7 +1367,7 @@ void SPUThread::stop_and_signal(u32 code)
 			throw EXCEPTION("Invalid SPU Thread Group");
 		}
 
-		for (auto thread : group->threads)
+		for (auto& thread : group->threads)
 		{
 			if (thread && thread.get() != this)
 			{
@@ -1421,7 +1394,7 @@ void SPUThread::stop_and_signal(u32 code)
 			throw EXCEPTION("sys_spu_thread_exit(): Out_MBox is empty");
 		}
 
-		if (Ini.HLELogging.GetValue())
+		if (rpcs3::config.misc.log.hle_logging.value())
 		{
 			LOG_NOTICE(SPU, "sys_spu_thread_exit(status=0x%x)", ch_out_mbox.get_value());
 		}
@@ -1452,7 +1425,7 @@ void SPUThread::stop_and_signal(u32 code)
 
 void SPUThread::halt()
 {
-	if (Ini.HLELogging.GetValue())
+	if (rpcs3::config.misc.log.hle_logging.value())
 	{
 		LOG_NOTICE(SPU, "halt()");
 	}
@@ -1476,9 +1449,9 @@ void SPUThread::halt()
 
 spu_thread::spu_thread(u32 entry, const std::string& name, u32 stack_size, u32 prio)
 {
-	auto spu = Emu.GetIdManager().make_ptr<SPUThread>(name, 0x13370666);
+	auto spu = idm::make_ptr<SPUThread>(name, 0x13370666);
 
-	spu->PC = entry;
+	spu->pc = entry;
 
 	thread = std::move(spu);
 }

@@ -3,14 +3,14 @@
 #include "Emu/System.h"
 #include "Emu/SysCalls/Modules.h"
 
-#include "Emu/SysCalls/lv2/sleep_queue.h"
+#include "Emu/SysCalls/lv2/sys_sync.h"
 #include "Emu/SysCalls/lv2/sys_lwmutex.h"
 #include "Emu/SysCalls/lv2/sys_lwcond.h"
 #include "Emu/SysCalls/lv2/sys_spu.h"
 #include "cellSpurs.h"
 #include "cellSpursJq.h"
 
-extern Module cellSpursJq;
+extern Module<> cellSpursJq;
 
 s32 cellSpursJobQueueAttributeInitialize()
 {
@@ -390,7 +390,7 @@ s32 cellSpursJobQueueUnsetExceptionEventHandler()
 	return CELL_OK;
 }
 
-Module cellSpursJq("cellSpursJq", []()
+Module<> cellSpursJq("cellSpursJq", []()
 {
 	REG_FUNC(cellSpursJq, cellSpursJobQueueAttributeInitialize);
 	REG_FUNC(cellSpursJq, cellSpursJobQueueAttributeSetMaxGrab);

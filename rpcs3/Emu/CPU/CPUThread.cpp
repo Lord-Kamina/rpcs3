@@ -1,87 +1,88 @@
 #include "stdafx.h"
-#include "rpcs3/Ini.h"
-#include "Utilities/Log.h"
 #include "Emu/Memory/Memory.h"
 #include "Emu/System.h"
 #include "Emu/IdManager.h"
-#include "Emu/DbgCommand.h"
 
 #include "CPUDecoder.h"
 #include "CPUThread.h"
 
-CPUThread::CPUThread(CPUThreadType type, const std::string& name, std::function<std::string()> thread_name)
-	: m_state({ CPU_STATE_STOPPED })
-	, m_id(Emu.GetIdManager().get_current_id())
+thread_local CPUThread* g_tls_current_cpu_thread = nullptr;
+
+void CPUThread::on_task()
+{
+	g_tls_current_cpu_thread = this;
+
+	Emu.SendDbgCommand(DID_CREATE_THREAD, this);
+
+	std::unique_lock<std::mutex> lock(mutex);
+
+	// check thread status
+	while (is_alive())
+	{
+		CHECK_EMU_STATUS;
+
+		// check stop status
+		if (!is_stopped())
+		{
+			if (lock) lock.unlock();
+
+			try
+			{
+				cpu_task();
+			}
+			catch (CPUThreadReturn)
+			{
+				;
+			}
+			catch (CPUThreadStop)
+			{
+				m_state |= CPU_STATE_STOPPED;
+			}
+			catch (CPUThreadExit)
+			{
+				m_state |= CPU_STATE_DEAD;
+				break;
+			}
+			catch (...)
+			{
+				dump_info();
+				throw;
+			}
+
+			m_state &= ~CPU_STATE_RETURN;
+			continue;
+		}
+
+		if (!lock)
+		{
+			lock.lock();
+			continue;
+		}
+
+		cv.wait(lock);
+	}
+}
+
+CPUThread::CPUThread(CPUThreadType type, const std::string& name)
+	: m_id(idm::get_last_id())
 	, m_type(type)
 	, m_name(name)
 {
-	start(std::move(thread_name), [this]
-	{
-		SendDbgCommand(DID_CREATE_THREAD, this);
-
-		std::unique_lock<std::mutex> lock(mutex);
-
-		// check thread status
-		while (joinable() && is_alive())
-		{
-			CHECK_EMU_STATUS;
-
-			// check stop status
-			if (!is_stopped())
-			{
-				if (lock) lock.unlock();
-
-				try
-				{
-					task();
-				}
-				catch (CPUThreadReturn)
-				{
-					;
-				}
-				catch (CPUThreadStop)
-				{
-					m_state |= CPU_STATE_STOPPED;
-				}
-				catch (CPUThreadExit)
-				{
-					m_state |= CPU_STATE_DEAD;
-					break;
-				}
-				catch (const fmt::exception&)
-				{
-					dump_info();
-					throw;
-				}
-
-				m_state &= ~CPU_STATE_RETURN;
-				continue;
-			}
-
-			if (!lock)
-			{
-				lock.lock();
-				continue;
-			}
-
-			cv.wait(lock);
-		}
-	});
 }
 
 CPUThread::~CPUThread()
 {
-	if (joinable())
-	{
-		throw EXCEPTION("Thread not joined");
-	}
+	Emu.SendDbgCommand(DID_REMOVE_THREAD, this);
+}
 
-	SendDbgCommand(DID_REMOVE_THREAD, this);
+std::string CPUThread::get_name() const
+{
+	return m_name;
 }
 
 bool CPUThread::is_paused() const
 {
-	return (m_state.load() & CPU_STATE_PAUSED) != 0 || Emu.IsPaused();
+	return (m_state & CPU_STATE_PAUSED) != 0 || Emu.IsPaused();
 }
 
 void CPUThread::dump_info() const
@@ -94,27 +95,27 @@ void CPUThread::dump_info() const
 
 void CPUThread::run()
 {
-	SendDbgCommand(DID_START_THREAD, this);
+	Emu.SendDbgCommand(DID_START_THREAD, this);
 
 	init_stack();
 	init_regs();
 	do_run();
 
-	SendDbgCommand(DID_STARTED_THREAD, this);
+	Emu.SendDbgCommand(DID_STARTED_THREAD, this);
 }
 
 void CPUThread::pause()
 {
-	SendDbgCommand(DID_PAUSE_THREAD, this);
+	Emu.SendDbgCommand(DID_PAUSE_THREAD, this);
 
 	m_state |= CPU_STATE_PAUSED;
 
-	SendDbgCommand(DID_PAUSED_THREAD, this);
+	Emu.SendDbgCommand(DID_PAUSED_THREAD, this);
 }
 
 void CPUThread::resume()
 {
-	SendDbgCommand(DID_RESUME_THREAD, this);
+	Emu.SendDbgCommand(DID_RESUME_THREAD, this);
 
 	{
 		// lock for reliable notification
@@ -125,12 +126,12 @@ void CPUThread::resume()
 		cv.notify_one();
 	}
 
-	SendDbgCommand(DID_RESUMED_THREAD, this);
+	Emu.SendDbgCommand(DID_RESUMED_THREAD, this);
 }
 
 void CPUThread::stop()
 {
-	SendDbgCommand(DID_STOP_THREAD, this);
+	Emu.SendDbgCommand(DID_STOP_THREAD, this);
 
 	if (is_current())
 	{
@@ -146,18 +147,18 @@ void CPUThread::stop()
 		cv.notify_one();
 	}
 
-	SendDbgCommand(DID_STOPED_THREAD, this);
+	Emu.SendDbgCommand(DID_STOPED_THREAD, this);
 }
 
 void CPUThread::exec()
 {
-	SendDbgCommand(DID_EXEC_THREAD, this);
+	Emu.SendDbgCommand(DID_EXEC_THREAD, this);
+
+	m_state &= ~CPU_STATE_STOPPED;
 
 	{
 		// lock for reliable notification
 		std::lock_guard<std::mutex> lock(mutex);
-
-		m_state &= ~CPU_STATE_STOPPED;
 
 		cv.notify_one();
 	}
@@ -165,13 +166,14 @@ void CPUThread::exec()
 
 void CPUThread::exit()
 {
-	if (is_current())
+	m_state |= CPU_STATE_DEAD;
+
+	if (!is_current())
 	{
-		throw CPUThreadExit{};
-	}
-	else
-	{
-		throw EXCEPTION("Unable to exit another thread");
+		// lock for reliable notification
+		std::lock_guard<std::mutex> lock(mutex);
+		
+		cv.notify_one();
 	}
 }
 
@@ -204,13 +206,13 @@ void CPUThread::sleep()
 
 void CPUThread::awake()
 {
-	// must be called after the balanced Sleep() call
+	// must be called after the balanced sleep() call
 
 	if (m_state.atomic_op([](u64& state) -> bool
 	{
 		if (state < CPU_STATE_MAX)
 		{
-			throw EXCEPTION("Sleep()/Awake() inconsistency");
+			throw EXCEPTION("sleep()/awake() inconsistency");
 		}
 
 		if ((state -= CPU_STATE_MAX) < CPU_STATE_MAX)
@@ -263,7 +265,15 @@ bool CPUThread::check_status()
 	{
 		CHECK_EMU_STATUS; // check at least once
 
-		if (!is_paused()) break;
+		if (!is_alive())
+		{
+			return true;
+		}
+
+		if (!is_paused() && (m_state & CPU_STATE_INTR) == 0)
+		{
+			break;
+		}
 
 		if (!lock)
 		{
@@ -271,15 +281,20 @@ bool CPUThread::check_status()
 			continue;
 		}
 
+		if (!is_paused() && (m_state & CPU_STATE_INTR) != 0 && handle_interrupt())
+		{
+			continue;
+		}
+
 		cv.wait(lock);
 	}
 
-	if (m_state.load() & CPU_STATE_RETURN || is_stopped())
+	if (m_state & CPU_STATE_RETURN || is_stopped())
 	{
 		return true;
 	}
 
-	if (m_state.load() & CPU_STATE_STEP)
+	if (m_state & CPU_STATE_STEP)
 	{
 		// set PAUSE, but allow to execute once
 		m_state |= CPU_STATE_PAUSED;

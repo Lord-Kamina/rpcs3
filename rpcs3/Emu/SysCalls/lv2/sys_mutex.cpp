@@ -5,6 +5,7 @@
 #include "Emu/SysCalls/SysCalls.h"
 
 #include "Emu/Cell/PPUThread.h"
+#include "sys_sync.h"
 #include "sys_mutex.h"
 
 SysCallBase sys_mutex("sys_mutex");
@@ -55,14 +56,14 @@ s32 sys_mutex_create(vm::ptr<u32> mutex_id, vm::ptr<sys_mutex_attribute_t> attr)
 
 	const bool recursive = attr->recursive == SYS_SYNC_RECURSIVE;
 
-	if ((!recursive && attr->recursive != SYS_SYNC_NOT_RECURSIVE) || attr->pshared != SYS_SYNC_NOT_PROCESS_SHARED || attr->adaptive != SYS_SYNC_NOT_ADAPTIVE || attr->ipc_key.data() || attr->flags.data())
+	if ((!recursive && attr->recursive != SYS_SYNC_NOT_RECURSIVE) || attr->pshared != SYS_SYNC_NOT_PROCESS_SHARED || attr->adaptive != SYS_SYNC_NOT_ADAPTIVE || attr->ipc_key || attr->flags)
 	{
 		sys_mutex.Error("sys_mutex_create(): unknown attributes (recursive=0x%x, pshared=0x%x, adaptive=0x%x, ipc_key=0x%llx, flags=0x%x)", attr->recursive, attr->pshared, attr->adaptive, attr->ipc_key, attr->flags);
 
 		return CELL_EINVAL;
 	}
 
-	*mutex_id = Emu.GetIdManager().make<lv2_mutex_t>(recursive, protocol, attr->name_u64);
+	*mutex_id = idm::make<lv2_mutex_t>(recursive, protocol, attr->name_u64);
 
 	return CELL_OK;
 }
@@ -73,7 +74,7 @@ s32 sys_mutex_destroy(u32 mutex_id)
 
 	LV2_LOCK;
 
-	const auto mutex = Emu.GetIdManager().get<lv2_mutex_t>(mutex_id);
+	const auto mutex = idm::get<lv2_mutex_t>(mutex_id);
 
 	if (!mutex)
 	{
@@ -90,7 +91,7 @@ s32 sys_mutex_destroy(u32 mutex_id)
 		return CELL_EPERM;
 	}
 
-	Emu.GetIdManager().remove<lv2_mutex_t>(mutex_id);
+	idm::remove<lv2_mutex_t>(mutex_id);
 
 	return CELL_OK;
 }
@@ -103,7 +104,7 @@ s32 sys_mutex_lock(PPUThread& ppu, u32 mutex_id, u64 timeout)
 
 	LV2_LOCK;
 
-	const auto mutex = Emu.GetIdManager().get<lv2_mutex_t>(mutex_id);
+	const auto mutex = idm::get<lv2_mutex_t>(mutex_id);
 
 	if (!mutex)
 	{
@@ -131,7 +132,7 @@ s32 sys_mutex_lock(PPUThread& ppu, u32 mutex_id, u64 timeout)
 	// lock immediately if not locked
 	if (!mutex->owner)
 	{
-		mutex->owner = ppu.shared_from_this();
+		mutex->owner = std::static_pointer_cast<CPUThread>(ppu.shared_from_this());
 
 		return CELL_OK;
 	}
@@ -175,7 +176,7 @@ s32 sys_mutex_trylock(PPUThread& ppu, u32 mutex_id)
 
 	LV2_LOCK;
 
-	const auto mutex = Emu.GetIdManager().get<lv2_mutex_t>(mutex_id);
+	const auto mutex = idm::get<lv2_mutex_t>(mutex_id);
 
 	if (!mutex)
 	{
@@ -206,7 +207,7 @@ s32 sys_mutex_trylock(PPUThread& ppu, u32 mutex_id)
 	}
 
 	// own the mutex if free
-	mutex->owner = ppu.shared_from_this();
+	mutex->owner = std::static_pointer_cast<CPUThread>(ppu.shared_from_this());
 
 	return CELL_OK;
 }
@@ -217,7 +218,7 @@ s32 sys_mutex_unlock(PPUThread& ppu, u32 mutex_id)
 
 	LV2_LOCK;
 
-	const auto mutex = Emu.GetIdManager().get<lv2_mutex_t>(mutex_id);
+	const auto mutex = idm::get<lv2_mutex_t>(mutex_id);
 
 	if (!mutex)
 	{

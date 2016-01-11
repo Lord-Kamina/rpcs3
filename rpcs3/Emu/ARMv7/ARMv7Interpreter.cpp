@@ -1,5 +1,4 @@
 #include "stdafx.h"
-#include "Utilities/Log.h"
 #include "Emu/System.h"
 #include "Emu/Memory/Memory.h"
 #include "Emu/CPU/CPUDecoder.h"
@@ -541,7 +540,7 @@ void ARMv7_instrs::HACK(ARMv7Context& context, const ARMv7Code code, const ARMv7
 
 	if (ConditionPassed(context, cond))
 	{
-		execute_psv_func_by_index(context, index);
+		execute_psv_func_by_index(static_cast<ARMv7Thread&>(context), index);
 	}
 }
 
@@ -1963,7 +1962,7 @@ void ARMv7_instrs::LDM(ARMv7Context& context, const ARMv7Code code, const ARMv7_
 
 	if (ConditionPassed(context, cond))
 	{
-		auto memory = vm::ptr<u32>::make(context.read_gpr(n));
+		vm::ptr<u32> memory{ context.read_gpr(n), vm::addr };
 
 		for (u32 i = 0; i < 16; i++)
 		{
@@ -3540,7 +3539,7 @@ void ARMv7_instrs::PUSH(ARMv7Context& context, const ARMv7Code code, const ARMv7
 
 	if (ConditionPassed(context, cond))
 	{
-		auto memory = vm::ptr<u32>::make(context.SP);
+		vm::ptr<u32> memory{ context.SP, vm::addr };
 
 		for (u32 i = 15; ~i; i--)
 		{
@@ -3690,7 +3689,7 @@ void ARMv7_instrs::REV(ARMv7Context& context, const ARMv7Code code, const ARMv7_
 
 	if (ConditionPassed(context, cond))
 	{
-		context.write_gpr(d, _byteswap_ulong(context.read_gpr(m)), type == T1 ? 2 : 4);
+		context.write_gpr(d, se_storage<u32>::swap(context.read_gpr(m)), type == T1 ? 2 : 4);
 	}
 }
 

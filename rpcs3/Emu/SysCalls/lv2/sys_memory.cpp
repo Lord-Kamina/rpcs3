@@ -10,7 +10,7 @@ SysCallBase sys_memory("sys_memory");
 
 lv2_memory_container_t::lv2_memory_container_t(u32 size)
 	: size(size)
-	, id(Emu.GetIdManager().get_current_id())
+	, id(idm::get_last_id())
 {
 }
 
@@ -73,7 +73,7 @@ s32 sys_memory_allocate_from_container(u32 size, u32 cid, u64 flags, vm::ptr<u32
 	LV2_LOCK;
 
 	// Check if this container ID is valid
-	const auto ct = Emu.GetIdManager().get<lv2_memory_container_t>(cid);
+	const auto ct = idm::get<lv2_memory_container_t>(cid);
 
 	if (!ct)
 	{
@@ -155,7 +155,7 @@ s32 sys_memory_free(u32 addr)
 	const auto area = vm::get(vm::user_space);
 
 	// Check all memory containers
-	for (auto& ct : Emu.GetIdManager().get_all<lv2_memory_container_t>())
+	for (auto& ct : idm::get_all<lv2_memory_container_t>())
 	{
 		auto found = ct->allocs.find(addr);
 
@@ -210,7 +210,7 @@ s32 sys_memory_get_user_memory_size(vm::ptr<sys_memory_info_t> mem_info)
 	u32 reserved = 0;
 
 	// Check all memory containers
-	for (auto& ct : Emu.GetIdManager().get_all<lv2_memory_container_t>())
+	for (auto& ct : idm::get_all<lv2_memory_container_t>())
 	{
 		reserved += ct->size;
 	}
@@ -219,7 +219,7 @@ s32 sys_memory_get_user_memory_size(vm::ptr<sys_memory_info_t> mem_info)
 	
 	// Fetch the user memory available
 	mem_info->total_user_memory = area->size - reserved;
-	mem_info->available_user_memory = area->size - area->used.load();
+	mem_info->available_user_memory = area->size - area->used;
 
 	return CELL_OK;
 }
@@ -241,21 +241,20 @@ s32 sys_memory_container_create(vm::ptr<u32> cid, u32 size)
 	u32 reserved = 0;
 
 	// Check all memory containers
-	for (auto& ct : Emu.GetIdManager().get_all<lv2_memory_container_t>())
+	for (auto& ct : idm::get_all<lv2_memory_container_t>())
 	{
 		reserved += ct->size;
 	}
 
 	const auto area = vm::get(vm::user_space);
 
-	if (area->size < reserved + size ||
-		area->size - area->used.load() < size)
+	if (area->size < reserved + size || area->size - area->used < size)
 	{
 		return CELL_ENOMEM;
 	}
 
 	// Create the memory container
-	*cid = Emu.GetIdManager().make<lv2_memory_container_t>(size);
+	*cid = idm::make<lv2_memory_container_t>(size);
 
 	return CELL_OK;
 }
@@ -266,7 +265,7 @@ s32 sys_memory_container_destroy(u32 cid)
 
 	LV2_LOCK;
 
-	const auto ct = Emu.GetIdManager().get<lv2_memory_container_t>(cid);
+	const auto ct = idm::get<lv2_memory_container_t>(cid);
 
 	if (!ct)
 	{
@@ -274,12 +273,12 @@ s32 sys_memory_container_destroy(u32 cid)
 	}
 
 	// Check if some memory is not deallocated (the container cannot be destroyed in this case)
-	if (ct->used.load())
+	if (ct->used)
 	{
 		return CELL_EBUSY;
 	}
 
-	Emu.GetIdManager().remove<lv2_memory_container_t>(cid);
+	idm::remove<lv2_memory_container_t>(cid);
 
 	return CELL_OK;
 }
@@ -290,7 +289,7 @@ s32 sys_memory_container_get_size(vm::ptr<sys_memory_info_t> mem_info, u32 cid)
 
 	LV2_LOCK;
 
-	const auto ct = Emu.GetIdManager().get<lv2_memory_container_t>(cid);
+	const auto ct = idm::get<lv2_memory_container_t>(cid);
 
 	if (!ct)
 	{
@@ -298,7 +297,7 @@ s32 sys_memory_container_get_size(vm::ptr<sys_memory_info_t> mem_info, u32 cid)
 	}
 
 	mem_info->total_user_memory = ct->size; // total container memory
-	mem_info->available_user_memory = ct->size - ct->used.load(); // available container memory
+	mem_info->available_user_memory = ct->size - ct->used; // available container memory
 
 	return CELL_OK;
 }

@@ -1,11 +1,12 @@
 #include "stdafx.h"
 #include "VFS.h"
+#include "vfsDir.h"
+#include "vfsFile.h"
 #include "vfsDirBase.h"
 #include "Emu/HDD/HDD.h"
 #include "vfsDeviceLocalFile.h"
-#include "Ini.h"
 #include "Emu/System.h"
-#include "Utilities/Log.h"
+#include "Emu/state.h"
 
 std::vector<std::string> simplify_path_blocks(const std::string& path)
 {
@@ -168,12 +169,8 @@ bool VFS::CreateDir(const std::string& ps3_path) const
 
 	if (vfsDevice* dev = GetDevice(ps3_path, path))
 	{
-		std::unique_ptr<vfsDirBase> res(dev->GetNewDirStream());
-
-		if (res)
-		{
-			return res->Create(path);
-		}
+		// return dev->create_dir(path);
+		return fs::create_dir(path);
 	}
 
 	return false;
@@ -185,6 +182,7 @@ bool VFS::CreatePath(const std::string& ps3_path) const
 
 	if (vfsDevice* dev = GetDevice(ps3_path, path))
 	{
+		// return dev->create_path(path);
 		return fs::create_path(path);
 	}
 
@@ -197,12 +195,8 @@ bool VFS::RemoveFile(const std::string& ps3_path) const
 
 	if (vfsDevice* dev = GetDevice(ps3_path, path))
 	{
-		std::unique_ptr<vfsFileBase> res(dev->GetNewFileStream());
-
-		if (res)
-		{
-			return res->Remove(path);
-		}
+		// return dev->remove_file(path);
+		return fs::remove_file(path);
 	}
 
 	return false;
@@ -214,15 +208,60 @@ bool VFS::RemoveDir(const std::string& ps3_path) const
 
 	if (vfsDevice* dev = GetDevice(ps3_path, path))
 	{
-		std::unique_ptr<vfsDirBase> res(dev->GetNewDirStream());
-
-		if (res)
-		{
-			return res->Remove(path);
-		}
+		// return dev->remove_dir(path);
+		return fs::remove_dir(path);
 	}
 
 	return false;
+}
+
+void VFS::DeleteAll(const std::string& ps3_path) const
+{
+	// Delete directory and all its contents recursively
+	for (const auto entry : vfsDir(ps3_path))
+	{
+		if (entry->name == "." || entry->name == "..")
+		{
+			continue;
+		}
+
+		if (entry->flags & DirEntry_TypeFile)
+		{
+			RemoveFile(ps3_path + "/" + entry->name);
+		}
+
+		if (entry->flags & DirEntry_TypeDir)
+		{
+			DeleteAll(ps3_path + "/" + entry->name);
+		}
+	}
+
+	RemoveDir(ps3_path);
+}
+
+u64 VFS::GetDirSize(const std::string& ps3_path) const
+{
+	u64 result = 0;
+
+	for (const auto entry : vfsDir(ps3_path))
+	{
+		if (entry->name == "." || entry->name == "..")
+		{
+			continue;
+		}
+
+		if (entry->flags & DirEntry_TypeFile)
+		{
+			result += entry->size;
+		}
+
+		if (entry->flags & DirEntry_TypeDir)
+		{
+			result += GetDirSize(ps3_path + "/" + entry->name);
+		}
+	}
+
+	return result;
 }
 
 bool VFS::ExistsFile(const std::string& ps3_path) const
@@ -231,12 +270,8 @@ bool VFS::ExistsFile(const std::string& ps3_path) const
 
 	if (vfsDevice* dev = GetDevice(ps3_path, path))
 	{
-		std::unique_ptr<vfsFileBase> res(dev->GetNewFileStream());
-
-		if (res)
-		{
-			return res->Exists(path);
-		}
+		// return dev->is_file(path);
+		return fs::is_file(path);
 	}
 
 	return false;
@@ -248,18 +283,27 @@ bool VFS::ExistsDir(const std::string& ps3_path) const
 
 	if (vfsDevice* dev = GetDevice(ps3_path, path))
 	{
-		std::unique_ptr<vfsDirBase> res(dev->GetNewDirStream());
-
-		if (res)
-		{
-			return res->IsExists(path);
-		}
+		// return dev->is_dir(path);
+		return fs::is_dir(path);
 	}
 
 	return false;
 }
 
-bool VFS::RenameFile(const std::string& ps3_path_from, const std::string& ps3_path_to) const
+bool VFS::Exists(const std::string& ps3_path) const
+{
+	std::string path;
+
+	if (vfsDevice* dev = GetDevice(ps3_path, path))
+	{
+		// return dev->exists(path);
+		return fs::exists(path);
+	}
+
+	return false;
+}
+
+bool VFS::Rename(const std::string& ps3_path_from, const std::string& ps3_path_to) const
 {
 	std::string path_from, path_to;
 
@@ -267,32 +311,8 @@ bool VFS::RenameFile(const std::string& ps3_path_from, const std::string& ps3_pa
 	{
 		if (vfsDevice* dev_ = GetDevice(ps3_path_to, path_to))
 		{
-			std::unique_ptr<vfsFileBase> res(dev->GetNewFileStream());
-
-			if (res)
-			{
-				return res->Rename(path_from, path_to);
-			}
-		}
-	}
-
-	return false;
-}
-
-bool VFS::RenameDir(const std::string& ps3_path_from, const std::string& ps3_path_to) const
-{
-	std::string path_from, path_to;
-
-	if (vfsDevice* dev = GetDevice(ps3_path_from, path_from))
-	{
-		if (vfsDevice* dev_ = GetDevice(ps3_path_to, path_to))
-		{
-			std::unique_ptr<vfsDirBase> res(dev->GetNewDirStream());
-
-			if (res)
-			{
-				return res->Rename(path_from, path_to);
-			}
+			// return dev->rename(dev_, path_from, path_to);
+			return fs::rename(path_from, path_to);
 		}
 	}
 
@@ -307,6 +327,7 @@ bool VFS::CopyFile(const std::string& ps3_path_from, const std::string& ps3_path
 	{
 		if (vfsDevice* dev_ = GetDevice(ps3_path_to, path_to))
 		{
+			// return dev->copy_file(dev_, path_from, path_to, overwrite);
 			return fs::copy_file(path_from, path_to, overwrite);
 		}
 	}
@@ -320,6 +341,7 @@ bool VFS::TruncateFile(const std::string& ps3_path, u64 length) const
 
 	if (vfsDevice* dev = GetDevice(ps3_path, path))
 	{
+		// return dev->truncate_file(path, length);
 		return fs::truncate_file(path, length);
 	}
 
@@ -457,15 +479,14 @@ void VFS::Init(const std::string& path)
 		}
 		
 		std::string mpath = entry.path;
-		// TODO: This shouldn't use current dir
 		// If no value assigned to SysEmulationDirPath in INI, use the path that with executable.
-		if (Ini.SysEmulationDirPathEnable.GetValue())
+		if (rpcs3::config.system.emulation_dir_path_enable.value())
 		{
-			fmt::Replace(mpath, "$(EmulatorDir)", Ini.SysEmulationDirPath.GetValue());
+			fmt::Replace(mpath, "$(EmulatorDir)", rpcs3::config.system.emulation_dir_path.value());
 		}
 		else
 		{
-			fmt::Replace(mpath, "$(EmulatorDir)", Emu.GetEmulatorPath());
+			fmt::Replace(mpath, "$(EmulatorDir)", fs::get_executable_dir());
 		}
 		fmt::Replace(mpath, "$(GameDir)", cwd);
 		Mount(entry.mount, mpath, dev);
@@ -476,13 +497,10 @@ void VFS::Init(const std::string& path)
 
 void VFS::SaveLoadDevices(std::vector<VFSManagerEntry>& res, bool is_load)
 {
-	IniEntry<int> entries_count;
-	entries_count.Init("count", "VFSManager");
-
 	int count = 0;
 	if (is_load)
 	{
-		count = entries_count.LoadValue(count);
+		count = rpcs3::config.vfs.count.value();
 
 		if (!count)
 		{
@@ -501,17 +519,17 @@ void VFS::SaveLoadDevices(std::vector<VFSManagerEntry>& res, bool is_load)
 	else
 	{
 		count = (int)res.size();
-		entries_count.SaveValue(count);
+		rpcs3::config.vfs.count = count;
 	}
 
 	// Custom EmulationDir
-	if (Ini.SysEmulationDirPathEnable.GetValue())
+	if (rpcs3::config.system.emulation_dir_path_enable.value())
 	{
-		std::string dir = Ini.SysEmulationDirPath.GetValue();
+		std::string dir = rpcs3::config.system.emulation_dir_path.value();
 
 		if (dir.empty())
 		{
-			Ini.SysEmulationDirPath.SetValue(Emu.GetEmulatorPath());
+			rpcs3::config.system.emulation_dir_path = fs::get_executable_dir();
 		}
 
 		if (!fs::is_dir(dir))
@@ -526,30 +544,25 @@ void VFS::SaveLoadDevices(std::vector<VFSManagerEntry>& res, bool is_load)
 
 	for(int i=0; i<count; ++i)
 	{
-		IniEntry<std::string> entry_path;
-		IniEntry<std::string> entry_device_path;
-		IniEntry<std::string> entry_mount;
-		IniEntry<int> entry_device;
+		rpcs3::config.vfs.add_entry(fmt::format("path[%d]", i), std::string{});
+		rpcs3::config.vfs.add_entry(fmt::format("device_path[%d]", i), std::string{});
+		rpcs3::config.vfs.add_entry(fmt::format("mount[%d]", i), std::string{});
+		rpcs3::config.vfs.add_entry(fmt::format("device[%d]", i), 0);
 
-		entry_path.Init(fmt::Format("path[%d]", i), "VFSManager");
-		entry_device_path.Init(fmt::Format("device_path[%d]", i), "VFSManager");
-		entry_mount.Init(fmt::Format("mount[%d]", i), "VFSManager");
-		entry_device.Init(fmt::Format("device[%d]", i), "VFSManager");
-		
 		if (is_load)
 		{
 			res[i] = VFSManagerEntry();
-			res[i].path = entry_path.LoadValue("");
-			res[i].device_path = entry_device_path.LoadValue("");
-			res[i].mount = entry_mount.LoadValue("");
-			res[i].device = (vfsDeviceType)entry_device.LoadValue(vfsDevice_LocalFile);
+			res[i].path = rpcs3::config.vfs.get_entry_value<std::string>(fmt::format("path[%d]", i), std::string{});
+			res[i].device_path = rpcs3::config.vfs.get_entry_value<std::string>(fmt::format("device_path[%d]", i), std::string{});
+			res[i].mount = rpcs3::config.vfs.get_entry_value<std::string>(fmt::format("mount[%d]", i), std::string{});
+			res[i].device = (vfsDeviceType)rpcs3::config.vfs.get_entry_value<int>(fmt::format("device[%d]", i), 0);
 		}
 		else
 		{
-			entry_path.SaveValue(res[i].path);
-			entry_device_path.SaveValue(res[i].device_path);
-			entry_mount.SaveValue(res[i].mount);
-			entry_device.SaveValue(res[i].device);
+			rpcs3::config.vfs.set_entry_value(fmt::format("path[%d]", i), res[i].path);
+			rpcs3::config.vfs.set_entry_value(fmt::format("device_path[%d]", i), res[i].device_path);
+			rpcs3::config.vfs.set_entry_value(fmt::format("mount[%d]", i), res[i].mount);
+			rpcs3::config.vfs.set_entry_value(fmt::format("device[%d]", i), (int)res[i].device);
 		}
 	}
 }

@@ -1,4 +1,5 @@
 #pragma once
+
 #include "../Common/ShaderParam.h"
 
 std::string getFloatTypeNameImp(size_t elementCount);

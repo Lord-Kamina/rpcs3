@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include "restore_new.h"
+#include "Utilities/Log.h"
 #pragma warning(push)
 #pragma message("TODO: remove wx dependency: <wx/image.h>")
 #pragma warning(disable : 4996)
@@ -9,6 +10,7 @@
 
 #ifndef _WIN32
 #include <dirent.h>
+#include <errno.h>
 #endif
 
 #include "rPlatform.h"
@@ -37,25 +39,4 @@ void rImage::SaveFile(const std::string& name, rImageType type)
 	{
 		throw EXCEPTION("unsupported type");
 	}
-}
-
-std::string rPlatform::getConfigDir()
-{
-	static std::string dir = ".";
-	if (dir == ".") {
-#ifdef _WIN32
-		dir = "";
-		//mkdir(dir.c_str());
-#else
-		if (getenv("XDG_CONFIG_HOME") != NULL)
-			dir = getenv("XDG_CONFIG_HOME");
-		else if (getenv("HOME") != NULL)
-			dir = getenv("HOME") + std::string("/.config");
-		else // Just in case
-			dir = "./config";
-		dir = dir + "/rpcs3/";
-		mkdir(dir.c_str(), 0777);
-#endif
-	}
-	return dir;
 }

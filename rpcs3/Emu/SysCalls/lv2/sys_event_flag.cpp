@@ -5,6 +5,7 @@
 #include "Emu/SysCalls/SysCalls.h"
 
 #include "Emu/Cell/PPUThread.h"
+#include "sys_sync.h"
 #include "sys_event_flag.h"
 
 SysCallBase sys_event_flag("sys_event_flag");
@@ -61,7 +62,7 @@ s32 sys_event_flag_create(vm::ptr<u32> id, vm::ptr<sys_event_flag_attribute_t> a
 		return CELL_EINVAL;
 	}
 
-	if (attr->pshared != SYS_SYNC_NOT_PROCESS_SHARED || attr->ipc_key.data() || attr->flags.data())
+	if (attr->pshared != SYS_SYNC_NOT_PROCESS_SHARED || attr->ipc_key || attr->flags)
 	{
 		sys_event_flag.Error("sys_event_flag_create(): unknown attributes (pshared=0x%x, ipc_key=0x%llx, flags=0x%x)", attr->pshared, attr->ipc_key, attr->flags);
 		return CELL_EINVAL;
@@ -75,7 +76,7 @@ s32 sys_event_flag_create(vm::ptr<u32> id, vm::ptr<sys_event_flag_attribute_t> a
 		return CELL_EINVAL;
 	}
 
-	*id = Emu.GetIdManager().make<lv2_event_flag_t>(init, protocol, type, attr->name_u64);
+	*id = idm::make<lv2_event_flag_t>(init, protocol, type, attr->name_u64);
 
 	return CELL_OK;
 }
@@ -86,7 +87,7 @@ s32 sys_event_flag_destroy(u32 id)
 
 	LV2_LOCK;
 
-	const auto eflag = Emu.GetIdManager().get<lv2_event_flag_t>(id);
+	const auto eflag = idm::get<lv2_event_flag_t>(id);
 
 	if (!eflag)
 	{
@@ -98,7 +99,7 @@ s32 sys_event_flag_destroy(u32 id)
 		return CELL_EBUSY;
 	}
 
-	Emu.GetIdManager().remove<lv2_event_flag_t>(id);
+	idm::remove<lv2_event_flag_t>(id);
 
 	return CELL_OK;
 }
@@ -124,7 +125,7 @@ s32 sys_event_flag_wait(PPUThread& ppu, u32 id, u64 bitptn, u32 mode, vm::ptr<u6
 		return CELL_EINVAL;
 	}
 
-	const auto eflag = Emu.GetIdManager().get<lv2_event_flag_t>(id);
+	const auto eflag = idm::get<lv2_event_flag_t>(id);
 
 	if (!eflag)
 	{
@@ -200,7 +201,7 @@ s32 sys_event_flag_trywait(u32 id, u64 bitptn, u32 mode, vm::ptr<u64> result)
 		return CELL_EINVAL;
 	}
 
-	const auto eflag = Emu.GetIdManager().get<lv2_event_flag_t>(id);
+	const auto eflag = idm::get<lv2_event_flag_t>(id);
 
 	if (!eflag)
 	{
@@ -225,7 +226,7 @@ s32 sys_event_flag_set(u32 id, u64 bitptn)
 
 	LV2_LOCK;
 
-	const auto eflag = Emu.GetIdManager().get<lv2_event_flag_t>(id);
+	const auto eflag = idm::get<lv2_event_flag_t>(id);
 
 	if (!eflag)
 	{
@@ -246,7 +247,7 @@ s32 sys_event_flag_clear(u32 id, u64 bitptn)
 
 	LV2_LOCK;
 
-	const auto eflag = Emu.GetIdManager().get<lv2_event_flag_t>(id);
+	const auto eflag = idm::get<lv2_event_flag_t>(id);
 
 	if (!eflag)
 	{
@@ -269,7 +270,7 @@ s32 sys_event_flag_cancel(u32 id, vm::ptr<u32> num)
 		*num = 0;
 	}
 
-	const auto eflag = Emu.GetIdManager().get<lv2_event_flag_t>(id);
+	const auto eflag = idm::get<lv2_event_flag_t>(id);
 
 	if (!eflag)
 	{
@@ -316,7 +317,7 @@ s32 sys_event_flag_get(u32 id, vm::ptr<u64> flags)
 		return CELL_EFAULT;
 	}
 
-	const auto eflag = Emu.GetIdManager().get<lv2_event_flag_t>(id);
+	const auto eflag = idm::get<lv2_event_flag_t>(id);
 
 	if (!eflag)
 	{

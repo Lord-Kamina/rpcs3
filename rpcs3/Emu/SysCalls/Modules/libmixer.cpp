@@ -1,5 +1,4 @@
 #include "stdafx.h"
-#include "Utilities/Log.h"
 #include "Emu/Memory/Memory.h"
 #include "Emu/System.h"
 #include "Emu/IdManager.h"
@@ -9,7 +8,7 @@
 #include "cellAudio.h"
 #include "libmixer.h"
 
-extern Module libmixer;
+extern Module<> libmixer;
 
 SurMixerConfig g_surmx;
 
@@ -310,7 +309,7 @@ s32 cellSurMixerCreate(vm::cptr<CellSurMixerConfig> config)
 	port.size = port.channel * port.block * AUDIO_SAMPLES * sizeof(float);
 	port.tag = 0;
 	port.level = 1.0f;
-	port.level_set.data = { 1.0f, 0.0f };
+	port.level_set.store({ 1.0f, 0.0f });
 
 	libmixer.Warning("*** audio port opened (port=%d)", g_surmx.audio_port);
 
@@ -321,14 +320,14 @@ s32 cellSurMixerCreate(vm::cptr<CellSurMixerConfig> config)
 
 	libmixer.Warning("*** surMixer created (ch1=%d, ch2=%d, ch6=%d, ch8=%d)", config->chStrips1, config->chStrips2, config->chStrips6, config->chStrips8);
 
-	const auto ppu = Emu.GetIdManager().make_ptr<PPUThread>("Surmixer Thread");
+	const auto ppu = idm::make_ptr<PPUThread>("Surmixer Thread");
 	ppu->prio = 1001;
 	ppu->stack_size = 0x10000;
 	ppu->custom_task = [](PPUThread& ppu)
 	{
 		AudioPortConfig& port = g_audio.ports[g_surmx.audio_port];
 
-		while (port.state.load() != AUDIO_PORT_STATE_CLOSED)
+		while (port.state != AUDIO_PORT_STATE_CLOSED)
 		{
 			CHECK_EMU_STATUS;
 
@@ -338,7 +337,7 @@ s32 cellSurMixerCreate(vm::cptr<CellSurMixerConfig> config)
 				continue;
 			}
 
-			if (port.state.load() == AUDIO_PORT_STATE_STARTED)
+			if (port.state == AUDIO_PORT_STATE_STARTED)
 			{
 				//u64 stamp0 = get_system_time();
 
@@ -429,7 +428,7 @@ s32 cellSurMixerCreate(vm::cptr<CellSurMixerConfig> config)
 
 				//u64 stamp2 = get_system_time();
 
-				auto buf = vm::get_ptr<be_t<float>>(port.addr + (g_surmx.mixcount % port.block) * port.channel * AUDIO_SAMPLES * sizeof(float));
+				auto buf = vm::_ptr<f32>(port.addr + (g_surmx.mixcount % port.block) * port.channel * AUDIO_SAMPLES * sizeof(float));
 
 				for (auto& mixdata : g_surmx.mixdata)
 				{
@@ -445,7 +444,7 @@ s32 cellSurMixerCreate(vm::cptr<CellSurMixerConfig> config)
 			g_surmx.mixcount++;
 		}
 
-		Emu.GetIdManager().remove<PPUThread>(ppu.get_id());
+		idm::remove<PPUThread>(ppu.get_id());
 	};
 
 	ppu->run();
@@ -614,7 +613,7 @@ float cellSurMixerUtilNoteToRatio(u8 refNote, u8 note)
 	throw EXCEPTION("");
 }
 
-Module libmixer("libmixer", []()
+Module<> libmixer("libmixer", []()
 {
 	g_surmx.audio_port = ~0;
 

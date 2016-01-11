@@ -13,13 +13,16 @@ add_custom_command(OUTPUT something_that_never_exists
 		-P ${CMAKE_CURRENT_SOURCE_DIR}/git-version.cmake)
 
 if(CMAKE_COMPILER_IS_GNUCXX)
-	if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 4.7.0)
+	if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 4.9.0) # TODO: the same for (apple) clang
 		message(FATAL_ERROR "GCC ${CMAKE_CXX_COMPILER_VERSION} is too old.")
 	endif()
 	# Warnings
 	add_compile_options(-Wno-attributes -Wno-enum-compare -Wno-invalid-offsetof)
-elseif("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
-	# TODO: stdlib?
+elseif("${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang")
+	add_compile_options(-ftemplate-depth=1024)
+	if(APPLE)
+		add_compile_options(-stdlib=libc++)
+	endif()
 endif()
 
 if(NOT MSVC)
@@ -29,6 +32,9 @@ if(NOT MSVC)
 	endif()
 	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++14 -fexceptions")
 	add_compile_options(-msse -msse2 -mcx16 -mssse3)
+	if(WIN32)
+		add_compile_options(-municode -static -mwindows)
+	endif()
 else()
 	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /EHa /Zc:throwingNew /D _CRT_SECURE_NO_DEPRECATE=1 /D _CRT_NON_CONFORMING_SWPRINTFS=1 /D _SCL_SECURE_NO_WARNINGS=1")
 endif()
@@ -41,7 +47,7 @@ endif()
 if(${CMAKE_SYSTEM_NAME} MATCHES "Linux")
 	#on some Linux distros shm_unlink and similar functions are in librt only
 	set(ADDITIONAL_LIBS "rt" "X11")
-elseif(UNIX)
+elseif(UNIX OR NOT MSVC)
 	#it seems like glibc includes the iconv functions we use but other libc
 	#implementations like the one on OSX don't seem implement them
 	set(ADDITIONAL_LIBS "iconv")
@@ -59,13 +65,26 @@ EndIf()
 set(CMAKE_MODULE_PATH "${RPCS3_SRC_DIR}/cmake_modules")
 
 if(NOT WIN32)
-    add_definitions(-DGL_GLEXT_PROTOTYPES)
-    add_definitions(-DGLX_GLXEXT_PROTOTYPES)
+	add_definitions(-DGL_GLEXT_PROTOTYPES)
+	add_definitions(-DGLX_GLXEXT_PROTOTYPES)
 endif()
 
 find_package(wxWidgets COMPONENTS core base net aui gl xml REQUIRED)
-if(NOT WIN32)
-    find_package(GLEW REQUIRED)
+if(NOT MSVC)
+	if(APPLE)
+		find_path(GLEW_INCLUDE_DIR GL/glew.h
+			/usr/include/GL
+			/usr/openwin/share/include
+			/usr/openwin/include
+			/usr/X11R6/include
+			/usr/include/X11
+			/opt/graphics/OpenGL/include
+			/opt/graphics/OpenGL/contrib/libglew
+			/usr/local/include
+		)
+	endif()
+	find_package(GLEW REQUIRED)
+	find_package(ZLIB REQUIRED)
 endif()
 find_package(OpenGL REQUIRED)
 find_package(OpenAL REQUIRED)
@@ -82,6 +101,7 @@ else()
 endif()
 
 include_directories(
+${GLEW_INCLUDE_DIR}
 ${wxWidgets_INCLUDE_DIRS}
 ${OPENAL_INCLUDE_DIR}
 ${LLVM_INCLUDE_DIRS}
@@ -91,12 +111,21 @@ ${LLVM_INCLUDE_DIRS}
 "${RPCS3_SRC_DIR}/Crypto"
 "${RPCS3_SRC_DIR}/.."
 "${RPCS3_SRC_DIR}/../asmjit/src/asmjit"
+"${RPCS3_SRC_DIR}/../glm"
+"${RPCS3_SRC_DIR}/../GSL/include"
+"${RPCS3_SRC_DIR}/../rsx_program_decompiler/rsx_decompiler"
+"${RPCS3_SRC_DIR}/../rsx_program_decompiler/shader_code"
 )
 if(WIN32)
 	include_directories(BEFORE "${RPCS3_SRC_DIR}/../minidx9/Include")
+	include_directories(BEFORE "${RPCS3_SRC_DIR}/../minidx12/Include")
 endif()
 
-if(LLVM_FOUND)
+if(NOT LLVM_FOUND)
+	Message("LLVM not found! LLVM 3.6 is required. RPCS3 will be compiled without LLVM support.")
+elseif(${LLVM_PACKAGE_VERSION} VERSION_LESS "3.6" OR ${LLVM_PACKAGE_VERSION} VERSION_EQUAL "3.7" OR ${LLVM_PACKAGE_VERSION} VERSION_GREATER "3.7")
+	Message("LLVM ${LLVM_PACKAGE_VERSION} is not supported! LLVM 3.6 is required. RPCS3 will be compiled without LLVM support.")
+else()
 	add_definitions(${LLVM_DEFINITIONS})
 	add_definitions(-DLLVM_AVAILABLE)
 	if (CMAKE_BUILD_TYPE STREQUAL "Release")
@@ -111,7 +140,11 @@ if(LLVM_FOUND)
 	endif()
 endif()
 
-link_directories("${RPCS3_SRC_DIR}/../ffmpeg/${PLATFORM_ARCH}/lib" "${RPCS3_SRC_DIR}/../asmjit/")
+link_directories("${RPCS3_SRC_DIR}/../asmjit/" "${RPCS3_SRC_DIR}/../minidx12/")
+
+if(MSVC OR NOT WIN32)
+	link_directories("${RPCS3_SRC_DIR}/../ffmpeg/${PLATFORM_ARCH}/lib")
+endif()
 
 get_property(dirs DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY INCLUDE_DIRECTORIES)
 foreach(dir ${dirs})
@@ -122,18 +155,19 @@ file(
 GLOB_RECURSE
 RPCS3_SRC
 "${RPCS3_SRC_DIR}/rpcs3.cpp"
-"${RPCS3_SRC_DIR}/Ini.cpp"
+"${RPCS3_SRC_DIR}/config.cpp"
 "${RPCS3_SRC_DIR}/../Utilities/GNU.cpp"
 "${RPCS3_SRC_DIR}/Emu/*"
 "${RPCS3_SRC_DIR}/Gui/*"
 "${RPCS3_SRC_DIR}/Loader/*"
 "${RPCS3_SRC_DIR}/Crypto/*"
 "${RPCS3_SRC_DIR}/../Utilities/*"
+"${RPCS3_SRC_DIR}/../rsx_program_decompiler/rsx_decompiler/*"
+"${RPCS3_SRC_DIR}/../rsx_program_decompiler/shader_code/*"
 )
 
-list(REMOVE_ITEM RPCS3_SRC ${RPCS3_SRC_DIR}/../Utilities/simpleini/ConvertUTF.c)
-
 add_executable(rpcs3 ${RPCS3_SRC})
+
 
 if(NOT MSVC)
 	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -L${CMAKE_CURRENT_BINARY_DIR}/../asmjit/") #hack because the asmjit cmake file force fno exceptions upd: not sure if vs2015 build is affected
@@ -141,18 +175,24 @@ else()
 	set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /SUBSYSTEM:WINDOWS /NODEFAULTLIB:libc.lib /NODEFAULTLIB:libcmt.lib /NODEFAULTLIB:libcd.lib /NODEFAULTLIB:libcmtd.lib /NODEFAULTLIB:msvcrtd.lib")
 endif()
 if(WIN32) # I'm not sure we need all of these libs, but we link them in vs
-	target_link_libraries(rpcs3  odbc32.lib odbccp32.lib comctl32.lib ws2_32.lib shlwapi.lib winmm.lib kernel32.lib user32.lib gdi32.lib winspool.lib comdlg32.lib advapi32.lib shell32.lib ole32.lib oleaut32.lib uuid.lib)
+	target_link_libraries(rpcs3  odbc32.lib odbccp32.lib comctl32.lib ws2_32.lib shlwapi.lib winmm.lib kernel32.lib user32.lib gdi32.lib winspool.lib comdlg32.lib advapi32.lib shell32.lib ole32.lib oleaut32.lib uuid.lib Iphlpapi.lib)
 	if(LLVM_FOUND)
-		target_link_libraries(rpcs3  asmjit.lib ${wxWidgets_LIBRARIES} ${OPENAL_LIBRARY} avformat.lib avcodec.lib avutil.lib swresample.lib swscale.lib ${LLVM_LIBS} ${ADDITIONAL_LIBS})
-	else()
-		target_link_libraries(rpcs3  asmjit.lib ${wxWidgets_LIBRARIES} ${OPENAL_LIBRARY} avformat.lib avcodec.lib avutil.lib swresample.lib swscale.lib ${ADDITIONAL_LIBS})
+		target_link_libraries(rpcs3  ${LLVM_LIBS})
 	endif()
+	if(NOT MSVC)
+		target_link_libraries(rpcs3  ${OPENGL_LIBRARIES} ${GLEW_LIBRARY} opengl32.lib glu32.lib)
+	else()
+		target_link_libraries(rpcs3  dxgi.lib d2d1.lib dwrite.lib)
+	endif()
+	target_link_libraries(rpcs3  asmjit.lib avformat.lib avcodec.lib avutil.lib swresample.lib swscale.lib ${wxWidgets_LIBRARIES} ${OPENAL_LIBRARY} ${ADDITIONAL_LIBS})
 else()
 	if(LLVM_FOUND)
-		target_link_libraries(rpcs3  asmjit.a  ${wxWidgets_LIBRARIES} ${OPENAL_LIBRARY} ${GLEW_LIBRARY} ${OPENGL_LIBRARIES} libavformat.a libavcodec.a libavutil.a libswresample.a libswscale.a ${LLVM_LIBS} ${ADDITIONAL_LIBS})
+		target_link_libraries(rpcs3  asmjit.a  ${wxWidgets_LIBRARIES} ${OPENAL_LIBRARY} ${GLEW_LIBRARY} ${OPENGL_LIBRARIES})
+		target_link_libraries(rpcs3  libavformat.a libavcodec.a libavutil.a libswresample.a libswscale.a ${ZLIB_LIBRARIES} ${LLVM_LIBS} ${ADDITIONAL_LIBS})
 	else()
-		target_link_libraries(rpcs3  asmjit.a  ${wxWidgets_LIBRARIES} ${OPENAL_LIBRARY} ${GLEW_LIBRARY} ${OPENGL_LIBRARIES} libavformat.a libavcodec.a libavutil.a libswresample.a libswscale.a ${ADDITIONAL_LIBS})
-	endif()
+		target_link_libraries(rpcs3  asmjit.a  ${wxWidgets_LIBRARIES} ${OPENAL_LIBRARY} ${GLEW_LIBRARY} ${OPENGL_LIBRARIES})
+		target_link_libraries(rpcs3  libavformat.a libavcodec.a libavutil.a libswresample.a libswscale.a ${ZLIB_LIBRARIES} ${ADDITIONAL_LIBS})
+    endif()
 endif()
 
 set_target_properties(rpcs3 PROPERTIES COTIRE_CXX_PREFIX_HEADER_INIT "${RPCS3_SRC_DIR}/stdafx.h")

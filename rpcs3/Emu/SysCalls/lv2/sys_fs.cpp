@@ -13,29 +13,6 @@
 
 SysCallBase sys_fs("sys_fs");
 
-std::array<atomic_t<u32>, 256> g_fds = {}; // file descriptors 0..255 mapped to IDs
-
-u32 _fd_to_id(u32 fd)
-{
-	return fd < g_fds.size() ? g_fds[fd].load() : 0;
-}
-
-lv2_file_t::~lv2_file_t()
-{
-	if (Emu.IsStopped())
-	{
-		g_fds = {};
-	}
-}
-
-lv2_dir_t::~lv2_dir_t()
-{
-	if (Emu.IsStopped())
-	{
-		g_fds = {};
-	}
-}
-
 s32 sys_fs_test(u32 arg1, u32 arg2, vm::ptr<u32> arg3, u32 arg4, vm::ptr<char> arg5, u32 arg6)
 {
 	sys_fs.Todo("sys_fs_test(arg1=0x%x, arg2=0x%x, arg3=*0x%x, arg4=0x%x, arg5=*0x%x, arg6=0x%x) -> CELL_OK", arg1, arg2, arg3, arg4, arg5, arg6);
@@ -76,31 +53,31 @@ s32 sys_fs_open(vm::cptr<char> path, s32 flags, vm::ptr<u32> fd, s32 mode, vm::c
 
 	switch (flags & CELL_FS_O_ACCMODE)
 	{
-	case CELL_FS_O_RDONLY: open_mode |= o_read; break;
-	case CELL_FS_O_WRONLY: open_mode |= o_write; break;
-	case CELL_FS_O_RDWR: open_mode |= o_read | o_write; break;
+	case CELL_FS_O_RDONLY: open_mode |= fom::read; break;
+	case CELL_FS_O_WRONLY: open_mode |= fom::write; break;
+	case CELL_FS_O_RDWR: open_mode |= fom::read | fom::write; break;
 	}
 
 	if (flags & CELL_FS_O_CREAT)
 	{
-		open_mode |= o_create;
+		open_mode |= fom::create;
 	}
 
 	if (flags & CELL_FS_O_TRUNC)
 	{
-		open_mode |= o_trunc;
+		open_mode |= fom::trunc;
 	}
 
 	if (flags & CELL_FS_O_APPEND)
 	{
-		open_mode |= o_append;
+		open_mode |= fom::append;
 	}
 
 	if (flags & CELL_FS_O_EXCL)
 	{
 		if (flags & CELL_FS_O_CREAT)
 		{
-			open_mode |= o_excl;
+			open_mode |= fom::excl;
 		}
 		else
 		{
@@ -129,7 +106,7 @@ s32 sys_fs_open(vm::cptr<char> path, s32 flags, vm::ptr<u32> fd, s32 mode, vm::c
 	{
 		sys_fs.Error("sys_fs_open('%s'): failed to open file (flags=%#o, mode=%#o)", path.get_ptr(), flags, mode);
 
-		if (open_mode & o_excl)
+		if (open_mode & fom::excl)
 		{
 			return CELL_FS_EEXIST; // approximation
 		}
@@ -137,28 +114,24 @@ s32 sys_fs_open(vm::cptr<char> path, s32 flags, vm::ptr<u32> fd, s32 mode, vm::c
 		return CELL_FS_ENOENT;
 	}
 
-	for (u32 i = 3; i < g_fds.size(); i++)
+	const auto _file = idm::make_ptr<lv2_file_t>(std::move(file), mode, flags);
+
+	if (!_file)
 	{
-		// try to reserve fd
-		if (g_fds[i].compare_and_swap_test(0, ~0))
-		{
-			g_fds[i].store(Emu.GetIdManager().make<lv2_file_t>(std::move(file), mode, flags));
-
-			*fd = i;
-
-			return CELL_OK;
-		}
+		// out of file descriptors
+		return CELL_FS_EMFILE;
 	}
 
-	// out of file descriptors
-	return CELL_FS_EMFILE;
+	*fd = idm::get_last_id();
+
+	return CELL_OK;
 }
 
 s32 sys_fs_read(u32 fd, vm::ptr<void> buf, u64 nbytes, vm::ptr<u64> nread)
 {
 	sys_fs.Log("sys_fs_read(fd=%d, buf=0x%x, nbytes=0x%llx, nread=0x%x)", fd, buf, nbytes, nread);
 
-	const auto file = Emu.GetIdManager().get<lv2_file_t>(_fd_to_id(fd));
+	const auto file = idm::get<lv2_file_t>(fd);
 
 	if (!file || file->flags & CELL_FS_O_WRONLY)
 	{
@@ -176,7 +149,7 @@ s32 sys_fs_write(u32 fd, vm::cptr<void> buf, u64 nbytes, vm::ptr<u64> nwrite)
 {
 	sys_fs.Log("sys_fs_write(fd=%d, buf=*0x%x, nbytes=0x%llx, nwrite=*0x%x)", fd, buf, nbytes, nwrite);
 
-	const auto file = Emu.GetIdManager().get<lv2_file_t>(_fd_to_id(fd));
+	const auto file = idm::get<lv2_file_t>(fd);
 
 	if (!file || !(file->flags & CELL_FS_O_ACCMODE))
 	{
@@ -196,7 +169,7 @@ s32 sys_fs_close(u32 fd)
 {
 	sys_fs.Log("sys_fs_close(fd=%d)", fd);
 
-	const auto file = Emu.GetIdManager().get<lv2_file_t>(_fd_to_id(fd));
+	const auto file = idm::get<lv2_file_t>(fd);
 
 	if (!file)
 	{
@@ -205,9 +178,7 @@ s32 sys_fs_close(u32 fd)
 
 	// TODO: return CELL_FS_EBUSY if locked
 
-	Emu.GetIdManager().remove<lv2_file_t>(_fd_to_id(fd));
-
-	g_fds[fd].store(0);
+	idm::remove<lv2_file_t>(fd);
 
 	return CELL_OK;
 }
@@ -225,28 +196,24 @@ s32 sys_fs_opendir(vm::cptr<char> path, vm::ptr<u32> fd)
 		return CELL_FS_ENOENT;
 	}
 
-	for (u32 i = 3; i < g_fds.size(); i++)
+	const auto _dir = idm::make_ptr<lv2_dir_t>(std::move(dir));
+
+	if (!_dir)
 	{
-		// try to reserve fd
-		if (g_fds[i].compare_and_swap_test(0, ~0))
-		{
-			g_fds[i].store(Emu.GetIdManager().make<lv2_dir_t>(std::move(dir)));
-
-			*fd = i;
-
-			return CELL_OK;
-		}
+		// out of file descriptors
+		return CELL_FS_EMFILE;
 	}
 
-	// out of file descriptors
-	return CELL_FS_EMFILE;
+	*fd = idm::get_last_id();
+
+	return CELL_OK;
 }
 
 s32 sys_fs_readdir(u32 fd, vm::ptr<CellFsDirent> dir, vm::ptr<u64> nread)
 {
 	sys_fs.Warning("sys_fs_readdir(fd=%d, dir=*0x%x, nread=*0x%x)", fd, dir, nread);
 
-	const auto directory = Emu.GetIdManager().get<lv2_dir_t>(_fd_to_id(fd));
+	const auto directory = idm::get<lv2_dir_t>(fd);
 
 	if (!directory)
 	{
@@ -274,16 +241,14 @@ s32 sys_fs_closedir(u32 fd)
 {
 	sys_fs.Log("sys_fs_closedir(fd=%d)", fd);
 
-	const auto directory = Emu.GetIdManager().get<lv2_dir_t>(_fd_to_id(fd));
+	const auto directory = idm::get<lv2_dir_t>(fd);
 
 	if (!directory)
 	{
 		return CELL_FS_EBADF;
 	}
 
-	Emu.GetIdManager().remove<lv2_dir_t>(_fd_to_id(fd));
-
-	g_fds[fd].store(0);
+	idm::remove<lv2_dir_t>(fd);
 
 	return CELL_OK;
 }
@@ -325,7 +290,7 @@ s32 sys_fs_fstat(u32 fd, vm::ptr<CellFsStat> sb)
 {
 	sys_fs.Warning("sys_fs_fstat(fd=%d, sb=*0x%x)", fd, sb);
 
-	const auto file = Emu.GetIdManager().get<lv2_file_t>(_fd_to_id(fd));
+	const auto file = idm::get<lv2_file_t>(fd);
 
 	if (!file)
 	{
@@ -388,31 +353,13 @@ s32 sys_fs_rename(vm::cptr<char> from, vm::cptr<char> to)
 	sys_fs.Warning("*** from = '%s'", from.get_ptr());
 	sys_fs.Warning("*** to   = '%s'", to.get_ptr());
 
-	std::string ps3_path = from.get_ptr();
-
-	if (Emu.GetVFS().ExistsDir(ps3_path))
+	if (!Emu.GetVFS().Rename(from.get_ptr(), to.get_ptr()))
 	{
-		if (!Emu.GetVFS().RenameDir(ps3_path, to.get_ptr()))
-		{
-			return CELL_FS_EIO; // ???
-		}
-
-		sys_fs.Notice("sys_fs_rename(): directory '%s' renamed to '%s'", from.get_ptr(), to.get_ptr());
-		return CELL_OK;
+		return CELL_FS_ENOENT; // ???
 	}
 
-	if (Emu.GetVFS().ExistsFile(ps3_path))
-	{
-		if (!Emu.GetVFS().RenameFile(ps3_path, to.get_ptr()))
-		{
-			return CELL_FS_EIO; // ???
-		}
-
-		sys_fs.Notice("sys_fs_rename(): file '%s' renamed to '%s'", from.get_ptr(), to.get_ptr());
-		return CELL_OK;
-	}
-
-	return CELL_FS_ENOENT;
+	sys_fs.Notice("sys_fs_rename(): '%s' renamed to '%s'", from.get_ptr(), to.get_ptr());
+	return CELL_OK;
 }
 
 s32 sys_fs_rmdir(vm::cptr<char> path)
@@ -474,7 +421,7 @@ s32 sys_fs_lseek(u32 fd, s64 offset, s32 whence, vm::ptr<u64> pos)
 		return CELL_FS_EINVAL;
 	}
 
-	const auto file = Emu.GetIdManager().get<lv2_file_t>(_fd_to_id(fd));
+	const auto file = idm::get<lv2_file_t>(fd);
 
 	if (!file)
 	{
@@ -483,7 +430,7 @@ s32 sys_fs_lseek(u32 fd, s64 offset, s32 whence, vm::ptr<u64> pos)
 
 	std::lock_guard<std::mutex> lock(file->mutex);
 
-	*pos = file->file->Seek(offset, whence);
+	*pos = file->file->Seek(offset, (fsm)whence);
 
 	return CELL_OK;
 }
@@ -492,7 +439,7 @@ s32 sys_fs_fget_block_size(u32 fd, vm::ptr<u64> sector_size, vm::ptr<u64> block_
 {
 	sys_fs.Todo("sys_fs_fget_block_size(fd=%d, sector_size=*0x%x, block_size=*0x%x, arg4=*0x%x, arg5=*0x%x)", fd, sector_size, block_size, arg4, arg5);
 
-	const auto file = Emu.GetIdManager().get<lv2_file_t>(_fd_to_id(fd));
+	const auto file = idm::get<lv2_file_t>(fd);
 
 	if (!file)
 	{
@@ -540,7 +487,7 @@ s32 sys_fs_ftruncate(u32 fd, u64 size)
 {
 	sys_fs.Warning("sys_fs_ftruncate(fd=%d, size=0x%llx)", fd, size);
 
-	const auto file = Emu.GetIdManager().get<lv2_file_t>(_fd_to_id(fd));
+	const auto file = idm::get<lv2_file_t>(fd);
 
 	if (!file || !(file->flags & CELL_FS_O_ACCMODE))
 	{

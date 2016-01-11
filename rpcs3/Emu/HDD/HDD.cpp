@@ -1,5 +1,4 @@
 #include "stdafx.h"
-#include "Utilities/Log.h"
 #include "HDD.h"
 
 void vfsHDDManager::CreateBlock(vfsHDD_Block& block)
@@ -15,13 +14,13 @@ void vfsHDDManager::CreateEntry(vfsHDD_Entry& entry)
 	entry.atime = ctime;
 	entry.ctime = ctime;
 	entry.mtime = ctime;
-	entry.access = vfsReadWrite;
+	entry.access = 0666;
 	CreateBlock(entry);
 }
 
 void vfsHDDManager::CreateHDD(const std::string& path, u64 size, u64 block_size)
 {
-	fs::file f(path, o_write | o_create | o_trunc);
+	fs::file f(path, fom::rewrite);
 
 	static const u64 cur_dir_block = 1;
 
@@ -47,7 +46,9 @@ void vfsHDDManager::CreateHDD(const std::string& path, u64 size, u64 block_size)
 	}
 
 	u8 null = 0;
-	f.seek(hdr.block_count * hdr.block_size - sizeof(null));
+
+	CHECK_ASSERTION(f.seek(hdr.block_count * hdr.block_size - sizeof(null)) != -1);
+	
 	f.write(&null, sizeof(null));
 }
 
@@ -68,17 +69,19 @@ bool vfsHDDFile::goto_block(u64 n)
 		return false;
 	}
 
-	m_hdd.Seek(m_info.data_block * m_hdd_info.block_size);
+	CHECK_ASSERTION(m_hdd.Seek(m_info.data_block * m_hdd_info.block_size) != -1);
+
 	block_info.next_block = m_info.data_block;
 
-	for (u64 i = 0; i<n; ++i)
+	for (u64 i = 0; i < n; ++i)
 	{
 		if (!block_info.next_block || !block_info.is_used || block_info.next_block >= m_hdd_info.block_count)
 		{
 			return false;
 		}
 
-		m_hdd.Seek(block_info.next_block * m_hdd_info.block_size);
+		CHECK_ASSERTION(m_hdd.Seek(block_info.next_block * m_hdd_info.block_size) != -1);
+
 		m_hdd.Read(&block_info, sizeof(vfsHDD_Block));
 	}
 
@@ -101,31 +104,36 @@ void vfsHDDFile::RemoveBlocks(u64 start_block)
 
 void vfsHDDFile::WriteBlock(u64 block, const vfsHDD_Block& data)
 {
-	m_hdd.Seek(block * m_hdd_info.block_size);
+	CHECK_ASSERTION(m_hdd.Seek(block * m_hdd_info.block_size) != -1);
+	
 	m_hdd.Write(&data, sizeof(vfsHDD_Block));
 }
 
 void vfsHDDFile::ReadBlock(u64 block, vfsHDD_Block& data)
 {
-	m_hdd.Seek(block * m_hdd_info.block_size);
+	CHECK_ASSERTION(m_hdd.Seek(block * m_hdd_info.block_size) != -1);
+	
 	m_hdd.Read(&data, sizeof(vfsHDD_Block));
 }
 
 void vfsHDDFile::WriteEntry(u64 block, const vfsHDD_Entry& data)
 {
-	m_hdd.Seek(block * m_hdd_info.block_size);
+	CHECK_ASSERTION(m_hdd.Seek(block * m_hdd_info.block_size) != -1);
+	
 	m_hdd.Write(&data, sizeof(vfsHDD_Entry));
 }
 
 void vfsHDDFile::ReadEntry(u64 block, vfsHDD_Entry& data)
 {
-	m_hdd.Seek(block * m_hdd_info.block_size);
+	CHECK_ASSERTION(m_hdd.Seek(block * m_hdd_info.block_size) != -1);
+	
 	m_hdd.Read(&data, sizeof(vfsHDD_Entry));
 }
 
 void vfsHDDFile::ReadEntry(u64 block, vfsHDD_Entry& data, std::string& name)
 {
-	m_hdd.Seek(block * m_hdd_info.block_size);
+	CHECK_ASSERTION(m_hdd.Seek(block * m_hdd_info.block_size) != -1);
+	
 	m_hdd.Read(&data, sizeof(vfsHDD_Entry));
 	name.resize(GetMaxNameLen());
 	m_hdd.Read(&name.front(), GetMaxNameLen());
@@ -133,14 +141,16 @@ void vfsHDDFile::ReadEntry(u64 block, vfsHDD_Entry& data, std::string& name)
 
 void vfsHDDFile::ReadEntry(u64 block, std::string& name)
 {
-	m_hdd.Seek(block * m_hdd_info.block_size + sizeof(vfsHDD_Entry));
+	CHECK_ASSERTION(m_hdd.Seek(block * m_hdd_info.block_size + sizeof(vfsHDD_Entry)) != -1);
+	
 	name.resize(GetMaxNameLen());
 	m_hdd.Read(&name.front(), GetMaxNameLen());
 }
 
 void vfsHDDFile::WriteEntry(u64 block, const vfsHDD_Entry& data, const std::string& name)
 {
-	m_hdd.Seek(block * m_hdd_info.block_size);
+	CHECK_ASSERTION(m_hdd.Seek(block * m_hdd_info.block_size) != -1);
+	
 	m_hdd.Write(&data, sizeof(vfsHDD_Entry));
 	m_hdd.Write(name.c_str(), std::min<size_t>(GetMaxNameLen() - 1, name.length() + 1));
 }
@@ -157,7 +167,7 @@ u64 vfsHDDFile::FindFreeBlock()
 {
 	vfsHDD_Block block_info;
 
-	for (u64 i = 0; i<m_hdd_info.block_count; ++i)
+	for (u64 i = 0; i < m_hdd_info.block_count; ++i)
 	{
 		ReadBlock(i, block_info);
 
@@ -183,7 +193,10 @@ bool vfsHDDFile::Seek(u64 pos)
 
 void vfsHDDFile::SaveInfo()
 {
-	m_hdd.Seek(m_info_block * m_hdd_info.block_size);
+	CHECK_ASSERTION(m_hdd.Seek(m_info_block * m_hdd_info.block_size) != -1);
+
+	CHECK_ASSERTION(m_hdd.Seek(m_info_block * m_hdd_info.block_size) != -1);
+
 	m_hdd.Write(&m_info, sizeof(vfsHDD_Entry));
 }
 
@@ -198,9 +211,13 @@ u64 vfsHDDFile::Read(void* dst, u64 size)
 	u64 rsize = std::min<u64>(block_size - m_position, size);
 
 	vfsHDD_Block cur_block_info;
-	m_hdd.Seek(m_cur_block * m_hdd_info.block_size);
+	
+	CHECK_ASSERTION(m_hdd.Seek(m_cur_block * m_hdd_info.block_size) != -1);
+
 	m_hdd.Read(&cur_block_info, sizeof(vfsHDD_Block));
-	m_hdd.Seek(m_cur_block * m_hdd_info.block_size + sizeof(vfsHDD_Block)+m_position);
+	
+	CHECK_ASSERTION(m_hdd.Seek(m_cur_block * m_hdd_info.block_size + sizeof(vfsHDD_Block) + m_position) != -1);
+
 	m_hdd.Read(dst, rsize);
 	size -= rsize;
 	m_position += rsize;
@@ -221,7 +238,8 @@ u64 vfsHDDFile::Read(void* dst, u64 size)
 		m_cur_block = cur_block_info.next_block;
 		rsize = std::min<u64>(block_size, size);
 
-		m_hdd.Seek(cur_block_info.next_block * m_hdd_info.block_size);
+		CHECK_ASSERTION(m_hdd.Seek(cur_block_info.next_block * m_hdd_info.block_size) != -1);
+
 		m_hdd.Read(&cur_block_info, sizeof(vfsHDD_Block));
 
 		if (m_hdd.Read((u8*)dst + offset, rsize) != rsize)
@@ -272,7 +290,8 @@ u64 vfsHDDFile::Write(const void* src, u64 size)
 
 	if (wsize)
 	{
-		m_hdd.Seek(m_cur_block * m_hdd_info.block_size + sizeof(vfsHDD_Block)+m_position);
+		CHECK_ASSERTION(m_hdd.Seek(m_cur_block * m_hdd_info.block_size + sizeof(vfsHDD_Block) + m_position) != -1);
+
 		m_hdd.Write(src, wsize);
 		size -= wsize;
 		m_info.size += wsize;
@@ -302,7 +321,9 @@ u64 vfsHDDFile::Write(const void* src, u64 size)
 		wsize = std::min<u64>(block_size, size);
 
 		block_info.next_block = m_cur_block;
-		m_hdd.Seek(last_block * m_hdd_info.block_size);
+		
+		CHECK_ASSERTION(m_hdd.Seek(last_block * m_hdd_info.block_size) != -1);
+
 		if (m_hdd.Write(&block_info, sizeof(vfsHDD_Block)) != sizeof(vfsHDD_Block))
 		{
 			m_position = 0;
@@ -311,13 +332,16 @@ u64 vfsHDDFile::Write(const void* src, u64 size)
 		}
 
 		block_info.next_block = 0;
-		m_hdd.Seek(m_cur_block * m_hdd_info.block_size);
+
+		CHECK_ASSERTION(m_hdd.Seek(m_cur_block * m_hdd_info.block_size) != -1);
+
 		if (m_hdd.Write(&block_info, sizeof(vfsHDD_Block)) != sizeof(vfsHDD_Block))
 		{
 			m_position = 0;
 			SaveInfo();
 			return offset;
 		}
+
 		if ((m_position = m_hdd.Write((u8*)src + offset, wsize)) != wsize)
 		{
 			m_info.size += wsize;
@@ -353,7 +377,7 @@ vfsHDD::vfsHDD(vfsDevice* device, const std::string& hdd_path)
 	, m_hdd_path(hdd_path)
 	, vfsFileBase(device)
 {
-	m_hdd_file.Open(hdd_path, vfsReadWrite);
+	m_hdd_file.Open(hdd_path, fom::read | fom::write);
 	m_hdd_file.Read(&m_hdd_info, sizeof(vfsHDD_Hdr));
 	m_cur_dir_block = m_hdd_info.next_block;
 	if (!m_hdd_info.block_size)
@@ -361,7 +385,9 @@ vfsHDD::vfsHDD(vfsDevice* device, const std::string& hdd_path)
 		LOG_ERROR(HLE, "Bad block size!");
 		m_hdd_info.block_size = 2048;
 	}
-	m_hdd_file.Seek(m_cur_dir_block * m_hdd_info.block_size);
+
+	CHECK_ASSERTION(m_hdd_file.Seek(m_cur_dir_block * m_hdd_info.block_size) != -1);
+	
 	m_hdd_file.Read(&m_cur_dir, sizeof(vfsHDD_Entry));
 }
 
@@ -392,18 +418,25 @@ bool vfsHDD::SearchEntry(const std::string& name, u64& entry_block, u64* parent_
 	return false;
 }
 
-int vfsHDD::OpenDir(const std::string& name)
+s32 vfsHDD::OpenDir(const std::string& name)
 {
 	LOG_WARNING(HLE, "OpenDir(%s)", name.c_str());
 	u64 entry_block;
-	if (!SearchEntry(name, entry_block))
-		return -1;
 
-	m_hdd_file.Seek(entry_block * m_hdd_info.block_size);
+	if (!SearchEntry(name, entry_block))
+	{
+		return -1;
+	}
+
+	CHECK_ASSERTION(m_hdd_file.Seek(entry_block * m_hdd_info.block_size) != -1);
+	
 	vfsHDD_Entry entry;
 	m_hdd_file.Read(&entry, sizeof(vfsHDD_Entry));
+
 	if (entry.type == vfsHDD_Entry_File)
+	{
 		return 1;
+	}
 
 	m_cur_dir_block = entry.data_block;
 	ReadEntry(m_cur_dir_block, m_cur_dir);
@@ -430,7 +463,7 @@ u64 vfsHDD::FindFreeBlock()
 {
 	vfsHDD_Block block_info;
 
-	for (u64 i = 0; i<m_hdd_info.block_count; ++i)
+	for (u64 i = 0; i < m_hdd_info.block_count; ++i)
 	{
 		ReadBlock(i, block_info);
 
@@ -445,31 +478,36 @@ u64 vfsHDD::FindFreeBlock()
 
 void vfsHDD::WriteBlock(u64 block, const vfsHDD_Block& data)
 {
-	m_hdd_file.Seek(block * m_hdd_info.block_size);
+	CHECK_ASSERTION(m_hdd_file.Seek(block * m_hdd_info.block_size) != -1);
+	
 	m_hdd_file.Write(&data, sizeof(vfsHDD_Block));
 }
 
 void vfsHDD::ReadBlock(u64 block, vfsHDD_Block& data)
 {
-	m_hdd_file.Seek(block * m_hdd_info.block_size);
+	CHECK_ASSERTION(m_hdd_file.Seek(block * m_hdd_info.block_size) != -1);
+	
 	m_hdd_file.Read(&data, sizeof(vfsHDD_Block));
 }
 
 void vfsHDD::WriteEntry(u64 block, const vfsHDD_Entry& data)
 {
-	m_hdd_file.Seek(block * m_hdd_info.block_size);
+	CHECK_ASSERTION(m_hdd_file.Seek(block * m_hdd_info.block_size) != -1);
+	
 	m_hdd_file.Write(&data, sizeof(vfsHDD_Entry));
 }
 
 void vfsHDD::ReadEntry(u64 block, vfsHDD_Entry& data)
 {
-	m_hdd_file.Seek(block * m_hdd_info.block_size);
+	CHECK_ASSERTION(m_hdd_file.Seek(block * m_hdd_info.block_size) != -1);
+
 	m_hdd_file.Read(&data, sizeof(vfsHDD_Entry));
 }
 
 void vfsHDD::ReadEntry(u64 block, vfsHDD_Entry& data, std::string& name)
 {
-	m_hdd_file.Seek(block * m_hdd_info.block_size);
+	CHECK_ASSERTION(m_hdd_file.Seek(block * m_hdd_info.block_size) != -1);
+
 	m_hdd_file.Read(&data, sizeof(vfsHDD_Entry));
 	name.resize(GetMaxNameLen());
 	m_hdd_file.Read(&name.front(), GetMaxNameLen());
@@ -477,14 +515,16 @@ void vfsHDD::ReadEntry(u64 block, vfsHDD_Entry& data, std::string& name)
 
 void vfsHDD::ReadEntry(u64 block, std::string& name)
 {
-	m_hdd_file.Seek(block * m_hdd_info.block_size + sizeof(vfsHDD_Entry));
+	CHECK_ASSERTION(m_hdd_file.Seek(block * m_hdd_info.block_size + sizeof(vfsHDD_Entry)) != -1);
+	
 	name.resize(GetMaxNameLen());
 	m_hdd_file.Read(&name.front(), GetMaxNameLen());
 }
 
 void vfsHDD::WriteEntry(u64 block, const vfsHDD_Entry& data, const std::string& name)
 {
-	m_hdd_file.Seek(block * m_hdd_info.block_size);
+	CHECK_ASSERTION(m_hdd_file.Seek(block * m_hdd_info.block_size) != -1);
+	
 	m_hdd_file.Write(&data, sizeof(vfsHDD_Entry));
 	m_hdd_file.Write(name.c_str(), std::min<size_t>(GetMaxNameLen() - 1, name.length() + 1));
 }
@@ -619,13 +659,13 @@ bool vfsHDD::Open(const std::string& path, u32 mode)
 			{
 				if (pos - from > 1)
 				{
-					int res = OpenDir(std::string(s + from, pos));
+					s32 res = OpenDir(std::string(s + from, pos));
+
 					if (res == -1)
 					{
 						return false;
 					}
-
-					if (res == 1)
+					else if (res == 1)
 					{
 						file_pos = from;
 					}
@@ -747,16 +787,16 @@ u64 vfsHDD::Read(void* dst, u64 size)
 	return m_file.Read(dst, size); // ???
 }
 
-u64 vfsHDD::Seek(s64 offset, u32 mode)
+u64 vfsHDD::Seek(s64 offset, fsm seek_mode)
 {
-	switch (mode)
+	switch (seek_mode)
 	{
-	case from_begin: return m_file.Seek(offset);
-	case from_cur: return m_file.Seek(Tell() + offset);
-	case from_end: return m_file.Seek(m_file.GetSize() + offset);
+	case fsm::begin: return m_file.Seek(offset);
+	case fsm::cur: return m_file.Seek(Tell() + offset);
+	case fsm::end: return m_file.Seek(m_file.GetSize() + offset);
 	}
 
-	return m_file.Tell(); // ???
+	throw EXCEPTION("Unknown seek_mode(0x%x)", seek_mode);
 }
 
 u64 vfsHDD::Tell() const

@@ -5,19 +5,23 @@
 #include <wx/string.h>
 #pragma warning(pop)
 
-std::string u128::to_hex() const
+std::string v128::to_hex() const
 {
 	return fmt::format("%016llx%016llx", _u64[1], _u64[0]);
 }
 
-std::string u128::to_xyzw() const
+std::string v128::to_xyzw() const
 {
-	return fmt::Format("x: %g y: %g z: %g w: %g", _f[3], _f[2], _f[1], _f[0]);
+	return fmt::format("x: %g y: %g z: %g w: %g", _f[3], _f[2], _f[1], _f[0]);
 }
 
-std::string fmt::to_hex(u64 value, size_t count)
+std::string fmt::to_hex(u64 value, u64 count)
 {
-	assert(count - 1 < 16);
+	if (count - 1 >= 16)
+	{
+		throw EXCEPTION("Invalid count: 0x%llx", count);
+	}
+
 	count = std::max<u64>(count, 16 - cntlz64(value) / 4);
 
 	char res[16] = {};
@@ -74,7 +78,7 @@ std::string fmt::to_sdec(s64 svalue)
 	return std::string(&res[first], sizeof(res) - first);
 }
 
-extern const std::string fmt::placeholder = "???";
+//extern const std::string fmt::placeholder = "???";
 
 std::string fmt::replace_first(const std::string& src, const std::string& from, const std::string& to)
 {
@@ -208,6 +212,16 @@ std::vector<std::string> fmt::split(const std::string& source, std::initializer_
 	return std::move(result);
 }
 
+std::string fmt::trim(const std::string& source, const std::string& values)
+{
+	std::size_t begin = source.find_first_not_of(values);
+
+	if (begin == source.npos)
+		return{};
+
+	return source.substr(begin, source.find_last_not_of(values) + 1);
+}
+
 std::string fmt::tolower(std::string source)
 {
 	std::transform(source.begin(), source.end(), source.begin(), ::tolower);
@@ -240,8 +254,47 @@ std::string fmt::escape(std::string source)
 
 	for (char c = 0; c < 32; c++)
 	{
-		if (c != '\n') source = fmt::replace_all(source, std::string(1, c), fmt::Format("\\x%02X", c));
+		if (c != '\n') source = fmt::replace_all(source, std::string(1, c), fmt::format("\\x%02X", c));
 	}
 
 	return source;
+}
+
+bool fmt::match(const std::string &source, const std::string &mask)
+{
+	std::size_t source_position = 0, mask_position = 0;
+
+	for (; source_position < source.size() && mask_position < mask.size(); ++mask_position, ++source_position)
+	{
+		switch (mask[mask_position])
+		{
+		case '?': break;
+
+		case '*':
+			for (std::size_t test_source_position = source_position; test_source_position < source.size(); ++test_source_position)
+			{
+				if (match(source.substr(test_source_position), mask.substr(mask_position + 1)))
+				{
+					return true;
+				}
+			}
+			return false;
+
+		default:
+			if (source[source_position] != mask[mask_position])
+			{
+				return false;
+			}
+
+			break;
+		}
+	}
+
+	if (source_position != source.size())
+		return false;
+
+	if (mask_position != mask.size())
+		return false;
+
+	return true;
 }
